@@ -875,8 +875,8 @@ app.post('/api/users', authMiddleware, async (req, res) => {
 // Serve dashboard for all non-API routes
 app.get('*', (req, res) => {
   if (!req.path.startsWith('/api') && !req.path.startsWith('/webhook')) {
-    res.sendFile(path.join(__dirname, 'dashboard', 'index.html'));
-  res.sendFile(path.join(__dirname, 'index.html'));
+    res.sendFile(path.join(__dirname, 'index.html'));
+  }
 });
 
 // ==================== START SERVER ====================
