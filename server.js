@@ -19,8 +19,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'dashboard')));
-
+app.use(express.static(path.join(__dirname, 'public')));
 // File upload config
 const upload = multer({ dest: 'uploads/' });
 
@@ -877,7 +876,7 @@ app.post('/api/users', authMiddleware, async (req, res) => {
 app.get('*', (req, res) => {
   if (!req.path.startsWith('/api') && !req.path.startsWith('/webhook')) {
     res.sendFile(path.join(__dirname, 'dashboard', 'index.html'));
-  }
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
 // ==================== START SERVER ====================
