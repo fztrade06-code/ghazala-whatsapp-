@@ -8,26 +8,48 @@ const multer = require('multer');
 const csv = require('csv-parser');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
+const { WebSocketServer } = require('ws');
 require('dotenv').config();
 
 const { initDB, getPool } = require('./database');
 
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
 const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
 // File upload config
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 } });
 
 // WhatsApp API Config
 const WA_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'ghazala2024';
 const WA_API = `https://graph.facebook.com/v18.0/${PHONE_ID}/messages`;
+
+// ==================== WEBSOCKET ====================
+const clients = new Set();
+
+wss.on('connection', (ws) => {
+  clients.add(ws);
+  ws.on('close', () => clients.delete(ws));
+  ws.on('error', () => clients.delete(ws));
+});
+
+function broadcast(data) {
+  const msg = JSON.stringify(data);
+  clients.forEach(ws => {
+    try { if (ws.readyState === 1) ws.send(msg); } catch (e) { }
+  });
+}
 
 // ==================== AUTH MIDDLEWARE ====================
 function authMiddleware(req, res, next) {
@@ -40,6 +62,11 @@ function authMiddleware(req, res, next) {
   } catch {
     return res.status(401).json({ error: 'Invalid token' });
   }
+}
+
+function adminOnly(req, res, next) {
+  if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  next();
 }
 
 // ==================== WHATSAPP SEND FUNCTIONS ====================
@@ -63,7 +90,6 @@ async function sendTextMessage(phone, text) {
 
 async function sendInteractiveButtons(phone, bodyText, buttons) {
   try {
-    // WhatsApp max 3 buttons per message, handle overflow with list
     if (buttons.length <= 3) {
       const response = await axios.post(WA_API, {
         messaging_product: 'whatsapp',
@@ -84,13 +110,11 @@ async function sendInteractiveButtons(phone, bodyText, buttons) {
       });
       return response.data;
     } else {
-      // Use list message for more than 3 options
       const rows = buttons.map(b => ({
         id: b.id,
         title: b.title.substring(0, 24),
         description: ''
       }));
-
       const response = await axios.post(WA_API, {
         messaging_product: 'whatsapp',
         to: phone,
@@ -100,10 +124,7 @@ async function sendInteractiveButtons(phone, bodyText, buttons) {
           body: { text: bodyText },
           action: {
             button: 'Choose Option',
-            sections: [{
-              title: 'Options',
-              rows: rows.slice(0, 10)
-            }]
+            sections: [{ title: 'Options', rows: rows.slice(0, 10) }]
           }
         }
       }, {
@@ -113,7 +134,6 @@ async function sendInteractiveButtons(phone, bodyText, buttons) {
     }
   } catch (err) {
     console.error('Send interactive error:', err.response?.data || err.message);
-    // Fallback to text
     return await sendTextMessage(phone, bodyText);
   }
 }
@@ -124,16 +144,33 @@ async function sendTemplate(phone, templateName, variables) {
       type: 'body',
       parameters: variables.map(v => ({ type: 'text', text: String(v) }))
     }] : [];
-
     const response = await axios.post(WA_API, {
       messaging_product: 'whatsapp',
       to: phone,
       type: 'template',
-      template: {
-        name: templateName,
-        language: { code: 'en' },
-        components
-      }
+      template: { name: templateName, language: { code: 'en' }, components }
+    }, {
+      headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' }
+    });
+    return { success: true, data: response.data };
+  } catch (err) {
+    return { success: false, error: err.response?.data?.error?.message || err.message };
+  }
+}
+
+async function sendMediaMessage(phone, mediaType, mediaUrl, caption = '') {
+  try {
+    const typeMap = { image: 'image', video: 'video', audio: 'audio', document: 'document' };
+    const waType = typeMap[mediaType] || 'document';
+    const mediaObj = { link: mediaUrl };
+    if (caption && (waType === 'image' || waType === 'video' || waType === 'document')) {
+      mediaObj.caption = caption;
+    }
+    const response = await axios.post(WA_API, {
+      messaging_product: 'whatsapp',
+      to: phone,
+      type: waType,
+      [waType]: mediaObj
     }, {
       headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' }
     });
@@ -147,7 +184,7 @@ async function sendTemplate(phone, templateName, variables) {
 
 async function getBotFlow(triggerKey) {
   const pool = getPool();
-if (!pool) return null;
+  if (!pool) return null;
   try {
     const [rows] = await pool.execute(
       'SELECT * FROM bot_flows WHERE trigger_key = ? AND is_active = 1', [triggerKey]
@@ -156,9 +193,7 @@ if (!pool) return null;
       rows[0].buttons = typeof rows[0].buttons === 'string' ? JSON.parse(rows[0].buttons) : rows[0].buttons;
       return rows[0];
     }
-  } catch (err) {
-    console.error('Get flow error:', err.message);
-  }
+  } catch (err) { console.error('Get flow error:', err.message); }
   return null;
 }
 
@@ -197,20 +232,30 @@ async function setAgentMode(phone, agentMode) {
   } catch (err) { console.error('Agent mode error:', err.message); }
 }
 
-async function saveMessage(phone, name, direction, content, msgId = null) {
+async function saveMessage(phone, name, direction, content, msgId = null, msgType = 'text', mediaUrl = null) {
   const pool = getPool();
   if (!pool) return;
   try {
     await pool.execute(`
-      INSERT INTO messages (contact_phone, contact_name, direction, content, whatsapp_msg_id)
-      VALUES (?, ?, ?, ?, ?)
-    `, [phone, name || phone, direction, content, msgId]);
-
-    // Update contact last message time
+      INSERT INTO messages (contact_phone, contact_name, direction, content, whatsapp_msg_id, message_type, media_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [phone, name || phone, direction, content, msgId, msgType, mediaUrl]);
     await pool.execute(`
       INSERT INTO contacts (phone, name, last_message) VALUES (?, ?, NOW())
       ON DUPLICATE KEY UPDATE last_message = NOW(), name = COALESCE(VALUES(name), name)
     `, [phone, name || null]);
+
+    // Broadcast to WebSocket clients
+    broadcast({
+      type: 'new_message',
+      phone,
+      name: name || phone,
+      direction,
+      content,
+      msgType,
+      mediaUrl,
+      time: new Date().toISOString()
+    });
   } catch (err) { console.error('Save message error:', err.message); }
 }
 
@@ -222,23 +267,20 @@ async function saveLead(data) {
       INSERT INTO leads (name, phone, course, level, mode, timing, source)
       VALUES (?, ?, ?, ?, ?, ?, 'bot')
     `, [data.name, data.phone, data.course, data.level || null, data.mode || null, data.timing || null]);
+    broadcast({ type: 'new_lead', data });
   } catch (err) { console.error('Save lead error:', err.message); }
 }
 
-async function processIncomingMessage(phone, name, msgType, msgContent, msgId) {
-  // Save incoming message
-  await saveMessage(phone, name, 'inbound', msgContent, msgId);
-
-  // Get session
+async function processIncomingMessage(phone, name, msgType, msgContent, msgId, mediaUrl = null) {
+  await saveMessage(phone, name, 'inbound', msgContent, msgId, msgType, mediaUrl);
   const session = await getSession(phone);
 
-  // If agent mode — just save, don't bot respond
   if (session.agent_mode) {
     console.log(`[AGENT MODE] ${phone}: ${msgContent}`);
+    broadcast({ type: 'agent_message', phone, content: msgContent, msgType, mediaUrl });
     return;
   }
 
-  // Registration flow states
   if (session.state === 'reg_waiting_name') {
     await updateSession(phone, 'reg_waiting_phone', { ...session.data, name: msgContent });
     const reply = `Nice to meet you, *${msgContent}*! 😊\n\n📱 Enter your *phone number*:`;
@@ -268,11 +310,8 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId) {
       'reg_course_pte': 'PTE',
       'reg_course_spoken': 'Spoken English'
     };
-    const courseId = msgContent;
-    const courseName = courseMap[courseId] || msgContent;
-    const updatedData = { ...session.data, course: courseName };
-    await updateSession(phone, 'reg_waiting_mode', updatedData);
-
+    const courseName = courseMap[msgContent] || msgContent;
+    await updateSession(phone, 'reg_waiting_mode', { ...session.data, course: courseName });
     const modeButtons = [
       { id: 'reg_mode_onsite', title: '🏫 Onsite' },
       { id: 'reg_mode_online', title: '💻 Online' }
@@ -287,48 +326,33 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId) {
     const modeMap = { 'reg_mode_onsite': 'Onsite', 'reg_mode_online': 'Online' };
     const mode = modeMap[msgContent] || msgContent;
     const updatedData = { ...session.data, mode };
-
-    // Save lead
-    await saveLead({
-      name: updatedData.name,
-      phone: phone,
-      course: updatedData.course,
-      mode: mode,
-    });
-
+    await saveLead({ name: updatedData.name, phone, course: updatedData.course, mode });
     await updateSession(phone, 'idle', {});
-    const confirmMsg = `✅ *Registration Complete!*\n\n🎊 Thank you *${updatedData.name}*!\n\n📋 *Your Details:*\n👤 Name: ${updatedData.name}\n📱 Phone: ${phone}\n📚 Course: ${updatedData.course}\n🏫 Mode: ${mode}\n\nOur team will contact you soon to confirm your batch timing!\n\n📞 03142230194 | 03334429257`;
+    const confirmMsg = `✅ *Registration Complete!*\n\n🎊 Thank you *${updatedData.name}*!\n\n📋 *Your Details:*\n👤 Name: ${updatedData.name}\n📱 Phone: ${phone}\n📚 Course: ${updatedData.course}\n🏫 Mode: ${mode}\n\nOur team will contact you soon!\n\n📞 03142230194 | 03334429257`;
     await sendTextMessage(phone, confirmMsg);
     await saveMessage(phone, name, 'outbound', confirmMsg);
-
-    // Show main menu after registration
     setTimeout(async () => {
       const flow = await getBotFlow('main_menu');
-      if (flow && flow.buttons?.length > 0) {
-        await sendInteractiveButtons(phone, flow.message, flow.buttons);
-      }
+      if (flow && flow.buttons?.length > 0) await sendInteractiveButtons(phone, flow.message, flow.buttons);
     }, 2000);
     return;
   }
 
-  // Button/List reply handling
   let buttonId = null;
   if (msgType === 'interactive') {
     buttonId = msgContent;
   } else {
-    // Text commands
     const text = msgContent.toLowerCase().trim();
-    if (text === 'hi' || text === 'hello' || text === 'start' || text === 'menu' || text === 'helo' || text === 'hey') {
+    if (['hi', 'hello', 'start', 'menu', 'helo', 'hey', 'salam', 'assalam'].includes(text)) {
       buttonId = 'welcome';
     } else if (text === 'stop') {
       await handleOptOut(phone, name);
       return;
     } else {
-      buttonId = 'welcome'; // Default to welcome for unknown text
+      buttonId = 'welcome';
     }
   }
 
-  // Get bot flow for button
   const flow = await getBotFlow(buttonId);
   if (!flow) {
     const reply = 'Sorry, I didn\'t understand that. Type *menu* to see options.';
@@ -337,7 +361,6 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId) {
     return;
   }
 
-  // Handle special actions
   if (flow.action === 'agent_handover') {
     await setAgentMode(phone, 1);
     await sendTextMessage(phone, flow.message);
@@ -352,7 +375,6 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId) {
     return;
   }
 
-  // Send flow message with buttons
   if (flow.buttons && flow.buttons.length > 0) {
     await sendInteractiveButtons(phone, flow.message, flow.buttons);
   } else {
@@ -363,15 +385,12 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId) {
 
 async function handleOptOut(phone, name) {
   const pool = getPool();
-  if (pool) {
-    await pool.execute('UPDATE contacts SET status = "opted_out" WHERE phone = ?', [phone]);
-  }
+  if (pool) await pool.execute('UPDATE contacts SET status = "opted_out" WHERE phone = ?', [phone]);
   await sendTextMessage(phone, '✅ You have been unsubscribed. Reply *START* anytime to re-subscribe.');
 }
 
 // ==================== WEBHOOK ====================
 
-// Verify webhook
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -383,52 +402,52 @@ app.get('/webhook', (req, res) => {
   res.status(403).send('Forbidden');
 });
 
-// Receive messages
 app.post('/webhook', async (req, res) => {
-  res.status(200).send('OK'); // Always respond 200 first
-
+  res.status(200).send('OK');
   try {
     const body = req.body;
     if (body.object !== 'whatsapp_business_account') return;
-
     for (const entry of body.entry || []) {
       for (const change of entry.changes || []) {
         if (change.field !== 'messages') continue;
-
         const value = change.value;
-
-        // Handle message status updates
         if (value.statuses) {
           for (const status of value.statuses) {
             await updateMessageStatus(status.id, status.status);
           }
         }
-
-        // Handle incoming messages
         if (value.messages) {
           for (const msg of value.messages) {
             const phone = msg.from;
             const msgId = msg.id;
             const contact = value.contacts?.find(c => c.wa_id === phone);
             const name = contact?.profile?.name || phone;
-
             let content = '';
             let msgType = msg.type;
+            let mediaUrl = null;
 
             if (msg.type === 'text') {
               content = msg.text?.body || '';
             } else if (msg.type === 'interactive') {
-              if (msg.interactive?.type === 'button_reply') {
-                content = msg.interactive.button_reply?.id || '';
-              } else if (msg.interactive?.type === 'list_reply') {
-                content = msg.interactive.list_reply?.id || '';
+              if (msg.interactive?.type === 'button_reply') content = msg.interactive.button_reply?.id || '';
+              else if (msg.interactive?.type === 'list_reply') content = msg.interactive.list_reply?.id || '';
+            } else if (['image', 'video', 'audio', 'document', 'voice'].includes(msg.type)) {
+              const mediaObj = msg[msg.type] || {};
+              content = `[${msg.type}${mediaObj.caption ? ': ' + mediaObj.caption : ''}]`;
+              // Fetch media URL from WhatsApp
+              if (mediaObj.id) {
+                try {
+                  const mediaResp = await axios.get(`https://graph.facebook.com/v18.0/${mediaObj.id}`, {
+                    headers: { Authorization: `Bearer ${WA_TOKEN}` }
+                  });
+                  mediaUrl = mediaResp.data?.url || null;
+                } catch (e) { }
               }
             } else {
               content = `[${msg.type} message]`;
               msgType = 'text';
             }
-
-            await processIncomingMessage(phone, name, msgType, content, msgId);
+            await processIncomingMessage(phone, name, msgType, content, msgId, mediaUrl);
           }
         }
       }
@@ -443,6 +462,7 @@ async function updateMessageStatus(waId, status) {
   if (!pool) return;
   try {
     await pool.execute('UPDATE messages SET status = ? WHERE whatsapp_msg_id = ?', [status, waId]);
+    broadcast({ type: 'message_status', waId, status });
   } catch { }
 }
 
@@ -451,33 +471,67 @@ async function updateMessageStatus(waId, status) {
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   const pool = getPool();
-
   if (!pool) {
-    // Fallback if no DB
-    if (username === (process.env.ADMIN_USERNAME || 'admin') &&
-      password === (process.env.ADMIN_PASSWORD || 'ghazala123')) {
+    if (username === (process.env.ADMIN_USERNAME || 'admin') && password === (process.env.ADMIN_PASSWORD || 'ghazala123')) {
       const token = jwt.sign({ id: 1, username, role: 'admin' }, process.env.JWT_SECRET || 'ghazala_secret', { expiresIn: '7d' });
       return res.json({ success: true, token, user: { username, role: 'admin', name: 'Admin' } });
     }
     return res.status(401).json({ error: 'Invalid credentials' });
   }
-
   try {
     const [rows] = await pool.execute('SELECT * FROM users WHERE username = ? AND is_active = 1', [username]);
     if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
-
     const user = rows[0];
     const valid = bcrypt.compareSync(password, user.password);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-
     const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, process.env.JWT_SECRET || 'ghazala_secret', { expiresIn: '7d' });
     res.json({ success: true, token, user: { username: user.username, role: user.role, name: user.name } });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== DASHBOARD STATS ====================
+// ==================== PROFILE ====================
+
+app.get('/api/profile', authMiddleware, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.json({});
+  try {
+    const [rows] = await pool.execute('SELECT id, username, name, role, email, about, address, profile_pic, social_links, business_hours FROM users WHERE id = ?', [req.user.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const user = rows[0];
+    if (user.social_links) user.social_links = JSON.parse(user.social_links);
+    if (user.business_hours) user.business_hours = JSON.parse(user.business_hours);
+    res.json(user);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/profile', authMiddleware, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'No DB' });
+  const { name, email, about, address, profile_pic, social_links, business_hours } = req.body;
+  try {
+    await pool.execute(`
+      UPDATE users SET name=?, email=?, about=?, address=?, profile_pic=?, social_links=?, business_hours=? WHERE id=?
+    `, [name, email, about, address, profile_pic, JSON.stringify(social_links), JSON.stringify(business_hours), req.user.id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/profile/password', authMiddleware, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'No DB' });
+  const { currentPassword, newPassword } = req.body;
+  try {
+    const [rows] = await pool.execute('SELECT password FROM users WHERE id = ?', [req.user.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const valid = bcrypt.compareSync(currentPassword, rows[0].password);
+    if (!valid) return res.status(401).json({ error: 'Current password incorrect' });
+    const hashed = bcrypt.hashSync(newPassword, 10);
+    await pool.execute('UPDATE users SET password = ? WHERE id = ?', [hashed, req.user.id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ==================== STATS ====================
 
 app.get('/api/stats', authMiddleware, async (req, res) => {
   const pool = getPool();
@@ -489,18 +543,12 @@ app.get('/api/stats', authMiddleware, async (req, res) => {
     const [[broadcastCount]] = await pool.execute('SELECT COUNT(*) as count FROM broadcasts');
     const [[todayMsgs]] = await pool.execute('SELECT COUNT(*) as count FROM messages WHERE DATE(created_at) = CURDATE()');
     const [[newLeads]] = await pool.execute('SELECT COUNT(*) as count FROM leads WHERE DATE(created_at) = CURDATE()');
-
     res.json({
-      messages: msgCount.count,
-      contacts: contactCount.count,
-      leads: leadCount.count,
-      broadcasts: broadcastCount.count,
-      todayMessages: todayMsgs.count,
-      todayLeads: newLeads.count
+      messages: msgCount.count, contacts: contactCount.count,
+      leads: leadCount.count, broadcasts: broadcastCount.count,
+      todayMessages: todayMsgs.count, todayLeads: newLeads.count
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==================== CONTACTS ====================
@@ -518,7 +566,8 @@ app.get('/api/contacts', authMiddleware, async (req, res) => {
     query += ' ORDER BY last_message DESC LIMIT ? OFFSET ?';
     params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
     const [rows] = await pool.execute(query, params);
-    res.json(rows);
+    const [[{ total }]] = await pool.execute('SELECT COUNT(*) as total FROM contacts WHERE 1=1');
+    res.json({ contacts: rows, total });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -532,12 +581,10 @@ app.post('/api/contacts', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Import contacts from CSV
 app.post('/api/contacts/import', authMiddleware, upload.single('file'), async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
   if (!req.file) return res.status(400).json({ error: 'No file' });
-
   const results = [];
   fs.createReadStream(req.file.path)
     .pipe(csv())
@@ -560,6 +607,27 @@ app.post('/api/contacts/import', authMiddleware, upload.single('file'), async (r
     });
 });
 
+// Get contacts by segment for broadcast
+app.get('/api/contacts/segment/:seg', authMiddleware, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.json([]);
+  try {
+    const seg = req.params.seg;
+    let query = 'SELECT * FROM contacts WHERE status = "active"';
+    const params = [];
+    if (seg !== 'all') {
+      if (seg === 'new_leads') {
+        const [leads] = await pool.execute('SELECT phone, name FROM leads WHERE status = "new"');
+        return res.json(leads);
+      }
+      query += ' AND segment = ?';
+      params.push(seg);
+    }
+    const [rows] = await pool.execute(query, params);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ==================== CHAT / MESSAGES ====================
 
 app.get('/api/chats', authMiddleware, async (req, res) => {
@@ -567,15 +635,14 @@ app.get('/api/chats', authMiddleware, async (req, res) => {
   if (!pool) return res.json([]);
   try {
     const [rows] = await pool.execute(`
-      SELECT c.*, 
+      SELECT c.*,
         (SELECT content FROM messages WHERE contact_phone = c.phone ORDER BY created_at DESC LIMIT 1) as last_msg,
+        (SELECT message_type FROM messages WHERE contact_phone = c.phone ORDER BY created_at DESC LIMIT 1) as last_msg_type,
         (SELECT created_at FROM messages WHERE contact_phone = c.phone ORDER BY created_at DESC LIMIT 1) as last_msg_time,
         (SELECT COUNT(*) FROM messages WHERE contact_phone = c.phone AND direction = 'inbound' AND created_at > COALESCE(c.last_message, '2000-01-01')) as unread,
         (SELECT agent_mode FROM bot_sessions WHERE phone = c.phone) as agent_mode
-      FROM contacts c
-      WHERE c.status = 'active'
-      ORDER BY last_msg_time DESC
-      LIMIT 100
+      FROM contacts c WHERE c.status = 'active'
+      ORDER BY last_msg_time DESC LIMIT 100
     `);
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -593,25 +660,28 @@ app.get('/api/chats/:phone', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Send message from dashboard
 app.post('/api/chats/:phone/send', authMiddleware, async (req, res) => {
-  const { message } = req.body;
+  const { message, mediaUrl, mediaType } = req.body;
   const phone = req.params.phone;
   try {
-    const result = await sendTextMessage(phone, message);
-    await saveMessage(phone, null, 'outbound', message);
+    let result;
+    if (mediaUrl && mediaType) {
+      result = await sendMediaMessage(phone, mediaType, mediaUrl, message);
+      await saveMessage(phone, null, 'outbound', message || `[${mediaType}]`, null, mediaType, mediaUrl);
+    } else {
+      result = await sendTextMessage(phone, message);
+      await saveMessage(phone, null, 'outbound', message);
+    }
     res.json({ success: true, result });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Toggle agent mode
 app.post('/api/chats/:phone/agent', authMiddleware, async (req, res) => {
   const { agentMode } = req.body;
   const phone = req.params.phone;
   try {
     await setAgentMode(phone, agentMode ? 1 : 0);
     if (!agentMode) {
-      // Bot takes over — send welcome
       const flow = await getBotFlow('welcome');
       if (flow && flow.buttons?.length > 0) {
         await sendInteractiveButtons(phone, flow.message, flow.buttons);
@@ -631,29 +701,28 @@ app.post('/api/chats/:phone/agent', authMiddleware, async (req, res) => {
 app.post('/api/broadcast', authMiddleware, async (req, res) => {
   const pool = getPool();
   const { name, templateName, variables, segment, phones } = req.body;
-
   let contactList = [];
-
   if (phones && phones.length > 0) {
-    // Manual phone list
-    contactList = phones.map(p => ({ phone: p, name: '' }));
+    contactList = phones.map(p => ({ phone: p.phone || p, name: p.name || '' }));
   } else if (pool) {
-    // From DB segments
     let query = 'SELECT phone, name FROM contacts WHERE status = "active"';
     const params = [];
     if (segment && segment !== 'all') {
-      query += ' AND segment = ?';
-      params.push(segment);
+      if (segment === 'new_leads') {
+        const [leads] = await pool.execute('SELECT phone, name FROM leads WHERE status = "new"');
+        contactList = leads;
+      } else {
+        query += ' AND segment = ?';
+        params.push(segment);
+        const [rows] = await pool.execute(query, params);
+        contactList = rows;
+      }
+    } else {
+      const [rows] = await pool.execute(query, params);
+      contactList = rows;
     }
-    const [rows] = await pool.execute(query, params);
-    contactList = rows;
   }
-
-  if (contactList.length === 0) {
-    return res.status(400).json({ error: 'No contacts found' });
-  }
-
-  // Create broadcast record
+  if (contactList.length === 0) return res.status(400).json({ error: 'No contacts found' });
   let broadcastId = null;
   if (pool) {
     const [result] = await pool.execute(
@@ -662,66 +731,65 @@ app.post('/api/broadcast', authMiddleware, async (req, res) => {
     );
     broadcastId = result.insertId;
   }
-
   res.json({ success: true, broadcastId, totalContacts: contactList.length, message: 'Broadcast started' });
 
-  // Send in background with delay to avoid rate limiting
   (async () => {
     let sent = 0, failed = 0;
     for (const contact of contactList) {
-      // Replace variables with contact data
-      const finalVars = variables.map(v => {
-        if (v === '{{name}}' || v === '{name}') return contact.name || 'Student';
-        return v;
+      const finalVars = variables.map((v, i) => {
+        if (i === 0 && (!v || v === '{{name}}' || v === '{name}')) return contact.name || 'Student';
+        return v || '';
       });
-      // Replace first variable with name if it's a name field
-      if (finalVars.length > 0 && (finalVars[0] === '' || finalVars[0] === '{name}')) {
-        finalVars[0] = contact.name || 'Student';
-      }
-
       const result = await sendTemplate(contact.phone, templateName, finalVars);
-
       if (result.success) {
         sent++;
         if (pool) {
-          await pool.execute(
-            'INSERT INTO broadcast_logs (broadcast_id, phone, name, status) VALUES (?, ?, ?, "sent")',
-            [broadcastId, contact.phone, contact.name]
-          );
-          // Save to messages
+          await pool.execute('INSERT INTO broadcast_logs (broadcast_id, phone, name, status) VALUES (?, ?, ?, "sent")', [broadcastId, contact.phone, contact.name]);
           await saveMessage(contact.phone, contact.name, 'outbound', `[Template: ${templateName}]`);
         }
       } else {
         failed++;
         if (pool) {
-          await pool.execute(
-            'INSERT INTO broadcast_logs (broadcast_id, phone, name, status, error_msg) VALUES (?, ?, ?, "failed", ?)',
-            [broadcastId, contact.phone, contact.name, result.error]
-          );
+          await pool.execute('INSERT INTO broadcast_logs (broadcast_id, phone, name, status, error_msg) VALUES (?, ?, ?, "failed", ?)', [broadcastId, contact.phone, contact.name, result.error]);
         }
       }
-
-      // Update broadcast progress
       if (pool && broadcastId) {
-        await pool.execute(
-          'UPDATE broadcasts SET sent = ?, failed = ? WHERE id = ?',
-          [sent, failed, broadcastId]
-        );
+        await pool.execute('UPDATE broadcasts SET sent = ?, failed = ? WHERE id = ?', [sent, failed, broadcastId]);
+        broadcast({ type: 'broadcast_progress', broadcastId, sent, failed, total: contactList.length });
       }
-
-      // Rate limit: 1 message per 100ms to avoid Meta limits
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, 150));
     }
-
-    // Mark complete
     if (pool && broadcastId) {
-      await pool.execute(
-        'UPDATE broadcasts SET status = "completed", completed_at = NOW() WHERE id = ?',
-        [broadcastId]
-      );
+      await pool.execute('UPDATE broadcasts SET status = "completed", completed_at = NOW() WHERE id = ?', [broadcastId]);
+      broadcast({ type: 'broadcast_complete', broadcastId, sent, failed });
     }
     console.log(`✅ Broadcast complete: ${sent} sent, ${failed} failed`);
   })();
+});
+
+// Resend failed broadcast
+app.post('/api/broadcasts/:id/resend-failed', authMiddleware, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'No DB' });
+  try {
+    const [broadcast] = await pool.execute('SELECT * FROM broadcasts WHERE id = ?', [req.params.id]);
+    if (!broadcast.length) return res.status(404).json({ error: 'Broadcast not found' });
+    const b = broadcast[0];
+    const [failed] = await pool.execute('SELECT * FROM broadcast_logs WHERE broadcast_id = ? AND status = "failed"', [req.params.id]);
+    if (!failed.length) return res.json({ success: true, message: 'No failed messages' });
+    const variables = JSON.parse(b.template_variables || '[]');
+    res.json({ success: true, message: `Resending to ${failed.length} contacts` });
+    (async () => {
+      for (const log of failed) {
+        const finalVars = variables.map((v, i) => i === 0 ? (log.name || 'Student') : v);
+        const result = await sendTemplate(log.phone, b.template_name, finalVars);
+        await pool.execute('UPDATE broadcast_logs SET status = ?, error_msg = ? WHERE id = ?',
+          [result.success ? 'sent' : 'failed', result.success ? null : result.error, log.id]);
+        await new Promise(r => setTimeout(r, 150));
+      }
+      await pool.execute('UPDATE broadcasts SET failed = (SELECT COUNT(*) FROM broadcast_logs WHERE broadcast_id = ? AND status = "failed"), sent = (SELECT COUNT(*) FROM broadcast_logs WHERE broadcast_id = ? AND status = "sent") WHERE id = ?', [b.id, b.id, b.id]);
+    })();
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/broadcasts', authMiddleware, async (req, res) => {
@@ -730,6 +798,16 @@ app.get('/api/broadcasts', authMiddleware, async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM broadcasts ORDER BY created_at DESC LIMIT 50');
     res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/broadcasts/:id', authMiddleware, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.json({});
+  try {
+    const [rows] = await pool.execute('SELECT * FROM broadcasts WHERE id = ?', [req.params.id]);
+    const [logs] = await pool.execute('SELECT * FROM broadcast_logs WHERE broadcast_id = ? ORDER BY created_at DESC', [req.params.id]);
+    res.json({ ...(rows[0] || {}), logs });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -759,10 +837,8 @@ app.post('/api/templates', authMiddleware, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { name, template_name, category, variables, body } = req.body;
   try {
-    await pool.execute(
-      'INSERT INTO templates (name, template_name, category, variables, body) VALUES (?, ?, ?, ?, ?)',
-      [name, template_name, category, JSON.stringify(variables), body]
-    );
+    await pool.execute('INSERT INTO templates (name, template_name, category, variables, body) VALUES (?, ?, ?, ?, ?)',
+      [name, template_name, category, JSON.stringify(variables), body]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -772,15 +848,22 @@ app.put('/api/templates/:id', authMiddleware, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { name, template_name, category, variables, body } = req.body;
   try {
-    await pool.execute(
-      'UPDATE templates SET name=?, template_name=?, category=?, variables=?, body=? WHERE id=?',
-      [name, template_name, category, JSON.stringify(variables), body, req.params.id]
-    );
+    await pool.execute('UPDATE templates SET name=?, template_name=?, category=?, variables=?, body=? WHERE id=?',
+      [name, template_name, category, JSON.stringify(variables), body, req.params.id]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== BOT FLOWS (Editable) ====================
+app.delete('/api/templates/:id', authMiddleware, adminOnly, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'No DB' });
+  try {
+    await pool.execute('UPDATE templates SET is_active = 0 WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ==================== BOT FLOWS ====================
 
 app.get('/api/bot-flows', authMiddleware, async (req, res) => {
   const pool = getPool();
@@ -797,10 +880,8 @@ app.put('/api/bot-flows/:id', authMiddleware, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { message, buttons, is_active } = req.body;
   try {
-    await pool.execute(
-      'UPDATE bot_flows SET message=?, buttons=?, is_active=? WHERE id=?',
-      [message, JSON.stringify(buttons), is_active ? 1 : 0, req.params.id]
-    );
+    await pool.execute('UPDATE bot_flows SET message=?, buttons=?, is_active=? WHERE id=?',
+      [message, JSON.stringify(buttons), is_active ? 1 : 0, req.params.id]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -810,10 +891,17 @@ app.post('/api/bot-flows', authMiddleware, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { trigger_key, message, buttons, action } = req.body;
   try {
-    await pool.execute(
-      'INSERT INTO bot_flows (trigger_key, message, buttons, action) VALUES (?, ?, ?, ?)',
-      [trigger_key, message, JSON.stringify(buttons), action]
-    );
+    await pool.execute('INSERT INTO bot_flows (trigger_key, message, buttons, action) VALUES (?, ?, ?, ?)',
+      [trigger_key, message, JSON.stringify(buttons), action]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/bot-flows/:id', authMiddleware, adminOnly, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'No DB' });
+  try {
+    await pool.execute('DELETE FROM bot_flows WHERE id = ?', [req.params.id]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -824,7 +912,17 @@ app.get('/api/leads', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
   try {
-    const [rows] = await pool.execute('SELECT * FROM leads ORDER BY created_at DESC LIMIT 200');
+    const { course, mode, status, from, to, search } = req.query;
+    let query = 'SELECT * FROM leads WHERE 1=1';
+    const params = [];
+    if (course) { query += ' AND course = ?'; params.push(course); }
+    if (mode) { query += ' AND mode = ?'; params.push(mode); }
+    if (status) { query += ' AND status = ?'; params.push(status); }
+    if (from) { query += ' AND DATE(created_at) >= ?'; params.push(from); }
+    if (to) { query += ' AND DATE(created_at) <= ?'; params.push(to); }
+    if (search) { query += ' AND (name LIKE ? OR phone LIKE ?)'; params.push(`%${search}%`, `%${search}%`); }
+    query += ' ORDER BY created_at DESC LIMIT 200';
+    const [rows] = await pool.execute(query, params);
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -861,7 +959,7 @@ app.get('/api/users', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/users', authMiddleware, async (req, res) => {
+app.post('/api/users', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { username, password, name, role } = req.body;
@@ -872,21 +970,43 @@ app.post('/api/users', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Serve dashboard for all non-API routes
+app.put('/api/users/:id', authMiddleware, adminOnly, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'No DB' });
+  const { name, role, is_active, password } = req.body;
+  try {
+    if (password) {
+      const hashed = bcrypt.hashSync(password, 10);
+      await pool.execute('UPDATE users SET name=?, role=?, is_active=?, password=? WHERE id=?', [name, role, is_active, hashed, req.params.id]);
+    } else {
+      await pool.execute('UPDATE users SET name=?, role=?, is_active=? WHERE id=?', [name, role, is_active, req.params.id]);
+    }
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ==================== HEALTH ====================
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', time: new Date().toISOString(), db: !!getPool() });
+});
+
+// Serve frontend
 app.get('*', (req, res) => {
   if (!req.path.startsWith('/api') && !req.path.startsWith('/webhook')) {
     res.sendFile(path.join(__dirname, 'index.html'));
   }
 });
 
-// ==================== START SERVER ====================
+// ==================== START ====================
 
 async function start() {
   await initDB();
-  app.listen(PORT, () => {
+  server.listen(PORT, () => {
     console.log(`🚀 Ghazala WhatsApp System running on port ${PORT}`);
     console.log(`📊 Dashboard: http://localhost:${PORT}`);
     console.log(`🔗 Webhook: http://localhost:${PORT}/webhook`);
+    console.log(`🔌 WebSocket: ws://localhost:${PORT}`);
   });
 }
 
