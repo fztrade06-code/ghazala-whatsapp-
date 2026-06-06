@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const { WebSocketServer } = require('ws');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const { initDB, getPool } = require('./database');
@@ -17,27 +18,25 @@ const { initDB, getPool } = require('./database');
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
-
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// File upload config
 const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 } });
 
-// WhatsApp API Config
 const WA_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'ghazala2024';
 const WA_API = `https://graph.facebook.com/v18.0/${PHONE_ID}/messages`;
+const JWT_SECRET = process.env.JWT_SECRET || 'ghazala_secret';
+const ADMIN_PHONE = process.env.ADMIN_WHATSAPP || '';
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || '';
 
 // ==================== WEBSOCKET ====================
 const clients = new Set();
-
 wss.on('connection', (ws) => {
   clients.add(ws);
   ws.on('close', () => clients.delete(ws));
@@ -51,13 +50,63 @@ function broadcast(data) {
   });
 }
 
+// ==================== OTP STORE ====================
+const otpStore = new Map(); // key: username, value: { otp, expires, type }
+
+function generateOTP() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+async function sendOTPWhatsApp(phone, otp, purpose = 'login') {
+  if (!phone || !WA_TOKEN) return false;
+  try {
+    const msg = `🔐 *Ghazala Institute*\n\nYour ${purpose} OTP is:\n\n*${otp}*\n\n⏰ Valid for 10 minutes.\nDo not share this code.`;
+    await axios.post(WA_API, {
+      messaging_product: 'whatsapp',
+      to: phone,
+      type: 'text',
+      text: { body: msg }
+    }, { headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
+    return true;
+  } catch (e) {
+    console.error('OTP WhatsApp error:', e.message);
+    return false;
+  }
+}
+
+async function sendOTPEmail(email, otp, purpose = 'login') {
+  if (!email || !process.env.SMTP_USER) return false;
+  try {
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: parseInt(process.env.SMTP_PORT || '587'),
+      secure: false,
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    });
+    await transporter.sendMail({
+      from: `"Ghazala Institute" <${process.env.SMTP_USER}>`,
+      to: email,
+      subject: `Your OTP - Ghazala Institute`,
+      html: `<div style="font-family:sans-serif;padding:20px;background:#f5f5f5;">
+        <h2 style="color:#128C7E;">Ghazala Institute</h2>
+        <p>Your <b>${purpose}</b> OTP is:</p>
+        <h1 style="letter-spacing:8px;color:#333;">${otp}</h1>
+        <p style="color:#666;">Valid for 10 minutes. Do not share this code.</p>
+      </div>`
+    });
+    return true;
+  } catch (e) {
+    console.error('OTP Email error:', e.message);
+    return false;
+  }
+}
+
 // ==================== AUTH MIDDLEWARE ====================
 function authMiddleware(req, res, next) {
   const token = req.headers['authorization']?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token' });
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'ghazala_secret');
-    req.user = decoded;
+    req.user = jwt.verify(token, JWT_SECRET);
     next();
   } catch {
     return res.status(401).json({ error: 'Invalid token' });
@@ -69,19 +118,14 @@ function adminOnly(req, res, next) {
   next();
 }
 
-// ==================== WHATSAPP SEND FUNCTIONS ====================
-
+// ==================== WHATSAPP SEND ====================
 async function sendTextMessage(phone, text) {
   try {
-    const response = await axios.post(WA_API, {
-      messaging_product: 'whatsapp',
-      to: phone,
-      type: 'text',
+    const r = await axios.post(WA_API, {
+      messaging_product: 'whatsapp', to: phone, type: 'text',
       text: { body: text, preview_url: false }
-    }, {
-      headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' }
-    });
-    return response.data;
+    }, { headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
+    return r.data;
   } catch (err) {
     console.error('Send text error:', err.response?.data || err.message);
     return null;
@@ -91,46 +135,23 @@ async function sendTextMessage(phone, text) {
 async function sendInteractiveButtons(phone, bodyText, buttons) {
   try {
     if (buttons.length <= 3) {
-      const response = await axios.post(WA_API, {
-        messaging_product: 'whatsapp',
-        to: phone,
-        type: 'interactive',
+      const r = await axios.post(WA_API, {
+        messaging_product: 'whatsapp', to: phone, type: 'interactive',
         interactive: {
-          type: 'button',
-          body: { text: bodyText },
-          action: {
-            buttons: buttons.map(b => ({
-              type: 'reply',
-              reply: { id: b.id, title: b.title.substring(0, 20) }
-            }))
-          }
+          type: 'button', body: { text: bodyText },
+          action: { buttons: buttons.map(b => ({ type: 'reply', reply: { id: b.id, title: b.title.substring(0, 20) } })) }
         }
-      }, {
-        headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' }
-      });
-      return response.data;
+      }, { headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
+      return r.data;
     } else {
-      const rows = buttons.map(b => ({
-        id: b.id,
-        title: b.title.substring(0, 24),
-        description: ''
-      }));
-      const response = await axios.post(WA_API, {
-        messaging_product: 'whatsapp',
-        to: phone,
-        type: 'interactive',
+      const r = await axios.post(WA_API, {
+        messaging_product: 'whatsapp', to: phone, type: 'interactive',
         interactive: {
-          type: 'list',
-          body: { text: bodyText },
-          action: {
-            button: 'Choose Option',
-            sections: [{ title: 'Options', rows: rows.slice(0, 10) }]
-          }
+          type: 'list', body: { text: bodyText },
+          action: { button: 'Choose Option', sections: [{ title: 'Options', rows: buttons.slice(0, 10).map(b => ({ id: b.id, title: b.title.substring(0, 24), description: '' })) }] }
         }
-      }, {
-        headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' }
-      });
-      return response.data;
+      }, { headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
+      return r.data;
     }
   } catch (err) {
     console.error('Send interactive error:', err.response?.data || err.message);
@@ -140,19 +161,12 @@ async function sendInteractiveButtons(phone, bodyText, buttons) {
 
 async function sendTemplate(phone, templateName, variables) {
   try {
-    const components = variables && variables.length > 0 ? [{
-      type: 'body',
-      parameters: variables.map(v => ({ type: 'text', text: String(v) }))
-    }] : [];
-    const response = await axios.post(WA_API, {
-      messaging_product: 'whatsapp',
-      to: phone,
-      type: 'template',
+    const components = variables?.length > 0 ? [{ type: 'body', parameters: variables.map(v => ({ type: 'text', text: String(v) })) }] : [];
+    const r = await axios.post(WA_API, {
+      messaging_product: 'whatsapp', to: phone, type: 'template',
       template: { name: templateName, language: { code: 'en' }, components }
-    }, {
-      headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' }
-    });
-    return { success: true, data: response.data };
+    }, { headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
+    return { success: true, data: r.data };
   } catch (err) {
     return { success: false, error: err.response?.data?.error?.message || err.message };
   }
@@ -160,35 +174,24 @@ async function sendTemplate(phone, templateName, variables) {
 
 async function sendMediaMessage(phone, mediaType, mediaUrl, caption = '') {
   try {
-    const typeMap = { image: 'image', video: 'video', audio: 'audio', document: 'document' };
-    const waType = typeMap[mediaType] || 'document';
+    const waType = { image: 'image', video: 'video', audio: 'audio', document: 'document' }[mediaType] || 'document';
     const mediaObj = { link: mediaUrl };
-    if (caption && (waType === 'image' || waType === 'video' || waType === 'document')) {
-      mediaObj.caption = caption;
-    }
-    const response = await axios.post(WA_API, {
-      messaging_product: 'whatsapp',
-      to: phone,
-      type: waType,
-      [waType]: mediaObj
-    }, {
-      headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' }
-    });
-    return { success: true, data: response.data };
+    if (caption && ['image', 'video', 'document'].includes(waType)) mediaObj.caption = caption;
+    const r = await axios.post(WA_API, {
+      messaging_product: 'whatsapp', to: phone, type: waType, [waType]: mediaObj
+    }, { headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
+    return { success: true, data: r.data };
   } catch (err) {
     return { success: false, error: err.response?.data?.error?.message || err.message };
   }
 }
 
 // ==================== BOT ENGINE ====================
-
 async function getBotFlow(triggerKey) {
   const pool = getPool();
   if (!pool) return null;
   try {
-    const [rows] = await pool.execute(
-      'SELECT * FROM bot_flows WHERE trigger_key = ? AND is_active = 1', [triggerKey]
-    );
+    const [rows] = await pool.execute('SELECT * FROM bot_flows WHERE trigger_key = ? AND is_active = 1', [triggerKey]);
     if (rows.length > 0) {
       rows[0].buttons = typeof rows[0].buttons === 'string' ? JSON.parse(rows[0].buttons) : rows[0].buttons;
       return rows[0];
@@ -199,25 +202,25 @@ async function getBotFlow(triggerKey) {
 
 async function getSession(phone) {
   const pool = getPool();
-  if (!pool) return { phone, state: 'idle', data: {}, agent_mode: 0 };
+  if (!pool) return { phone, state: 'idle', data: {}, agent_mode: 0, last_flow: null };
   try {
     const [rows] = await pool.execute('SELECT * FROM bot_sessions WHERE phone = ?', [phone]);
     if (rows.length > 0) {
       rows[0].data = typeof rows[0].data === 'string' ? JSON.parse(rows[0].data || '{}') : (rows[0].data || {});
       return rows[0];
     }
-    return { phone, state: 'idle', data: {}, agent_mode: 0 };
-  } catch { return { phone, state: 'idle', data: {}, agent_mode: 0 }; }
+    return { phone, state: 'idle', data: {}, agent_mode: 0, last_flow: null };
+  } catch { return { phone, state: 'idle', data: {}, agent_mode: 0, last_flow: null }; }
 }
 
-async function updateSession(phone, state, data = {}) {
+async function updateSession(phone, state, data = {}, lastFlow = null) {
   const pool = getPool();
   if (!pool) return;
   try {
     await pool.execute(`
-      INSERT INTO bot_sessions (phone, state, data, last_activity) VALUES (?, ?, ?, NOW())
-      ON DUPLICATE KEY UPDATE state = VALUES(state), data = VALUES(data), last_activity = NOW()
-    `, [phone, state, JSON.stringify(data)]);
+      INSERT INTO bot_sessions (phone, state, data, last_flow, last_activity) VALUES (?, ?, ?, ?, NOW())
+      ON DUPLICATE KEY UPDATE state=VALUES(state), data=VALUES(data), last_flow=VALUES(last_flow), last_activity=NOW()
+    `, [phone, state, JSON.stringify(data), lastFlow]);
   } catch (err) { console.error('Session update error:', err.message); }
 }
 
@@ -227,7 +230,7 @@ async function setAgentMode(phone, agentMode) {
   try {
     await pool.execute(`
       INSERT INTO bot_sessions (phone, agent_mode) VALUES (?, ?)
-      ON DUPLICATE KEY UPDATE agent_mode = VALUES(agent_mode)
+      ON DUPLICATE KEY UPDATE agent_mode=VALUES(agent_mode)
     `, [phone, agentMode]);
   } catch (err) { console.error('Agent mode error:', err.message); }
 }
@@ -242,20 +245,9 @@ async function saveMessage(phone, name, direction, content, msgId = null, msgTyp
     `, [phone, name || phone, direction, content, msgId, msgType, mediaUrl]);
     await pool.execute(`
       INSERT INTO contacts (phone, name, last_message) VALUES (?, ?, NOW())
-      ON DUPLICATE KEY UPDATE last_message = NOW(), name = COALESCE(VALUES(name), name)
+      ON DUPLICATE KEY UPDATE last_message=NOW(), name=COALESCE(VALUES(name), name)
     `, [phone, name || null]);
-
-    // Broadcast to WebSocket clients
-    broadcast({
-      type: 'new_message',
-      phone,
-      name: name || phone,
-      direction,
-      content,
-      msgType,
-      mediaUrl,
-      time: new Date().toISOString()
-    });
+    broadcast({ type: 'new_message', phone, name: name || phone, direction, content, msgType, mediaUrl, time: new Date().toISOString() });
   } catch (err) { console.error('Save message error:', err.message); }
 }
 
@@ -264,118 +256,141 @@ async function saveLead(data) {
   if (!pool) return;
   try {
     await pool.execute(`
-      INSERT INTO leads (name, phone, course, level, mode, timing, source)
-      VALUES (?, ?, ?, ?, ?, ?, 'bot')
+      INSERT INTO leads (name, phone, course, level, mode, timing, source) VALUES (?, ?, ?, ?, ?, ?, 'bot')
     `, [data.name, data.phone, data.course, data.level || null, data.mode || null, data.timing || null]);
     broadcast({ type: 'new_lead', data });
   } catch (err) { console.error('Save lead error:', err.message); }
 }
 
+// ==================== BOT PROCESS - FIXED CONTEXT ====================
 async function processIncomingMessage(phone, name, msgType, msgContent, msgId, mediaUrl = null) {
   await saveMessage(phone, name, 'inbound', msgContent, msgId, msgType, mediaUrl);
   const session = await getSession(phone);
 
+  // Agent mode — forward to dashboard only
   if (session.agent_mode) {
-    console.log(`[AGENT MODE] ${phone}: ${msgContent}`);
     broadcast({ type: 'agent_message', phone, content: msgContent, msgType, mediaUrl });
     return;
   }
 
+  // ===== REGISTRATION FLOW =====
   if (session.state === 'reg_waiting_name') {
-    await updateSession(phone, 'reg_waiting_phone', { ...session.data, name: msgContent });
-    const reply = `Nice to meet you, *${msgContent}*! 😊\n\n📱 Enter your *phone number*:`;
+    if (!msgContent.trim()) return;
+    await updateSession(phone, 'reg_waiting_phone', { ...session.data, name: msgContent.trim() }, session.last_flow);
+    const reply = `Nice to meet you, *${msgContent.trim()}*! 😊\n\n📱 Please enter your *contact number*:`;
     await sendTextMessage(phone, reply);
     await saveMessage(phone, name, 'outbound', reply);
     return;
   }
 
   if (session.state === 'reg_waiting_phone') {
-    await updateSession(phone, 'reg_waiting_course', { ...session.data, altPhone: msgContent });
+    await updateSession(phone, 'reg_waiting_course', { ...session.data, altPhone: msgContent }, session.last_flow);
     const courseButtons = [
       { id: 'reg_course_german', title: '🇩🇪 German' },
       { id: 'reg_course_ielts', title: '📝 IELTS' },
       { id: 'reg_course_pte', title: '💻 PTE' },
       { id: 'reg_course_spoken', title: '🎤 Spoken English' }
     ];
-    const reply = '📚 *Which course?*';
+    const reply = '📚 *Which course would you like to join?*';
     await sendInteractiveButtons(phone, reply, courseButtons);
-    await saveMessage(phone, name, 'outbound', reply + ' [buttons shown]');
+    await saveMessage(phone, name, 'outbound', reply + ' [course buttons]');
     return;
   }
 
   if (session.state === 'reg_waiting_course') {
-    const courseMap = {
-      'reg_course_german': 'German',
-      'reg_course_ielts': 'IELTS',
-      'reg_course_pte': 'PTE',
-      'reg_course_spoken': 'Spoken English'
-    };
+    // CONTEXT FIX: only accept valid reg_course_ buttons in this state
+    const courseMap = { 'reg_course_german': 'German', 'reg_course_ielts': 'IELTS', 'reg_course_pte': 'PTE', 'reg_course_spoken': 'Spoken English' };
+    if (msgType === 'interactive' && !courseMap[msgContent]) {
+      // Wrong button pressed — ignore and re-ask
+      const courseButtons = [
+        { id: 'reg_course_german', title: '🇩🇪 German' },
+        { id: 'reg_course_ielts', title: '📝 IELTS' },
+        { id: 'reg_course_pte', title: '💻 PTE' },
+        { id: 'reg_course_spoken', title: '🎤 Spoken English' }
+      ];
+      await sendInteractiveButtons(phone, '📚 Please select your *course*:', courseButtons);
+      return;
+    }
     const courseName = courseMap[msgContent] || msgContent;
-    await updateSession(phone, 'reg_waiting_mode', { ...session.data, course: courseName });
-    const modeButtons = [
-      { id: 'reg_mode_onsite', title: '🏫 Onsite' },
-      { id: 'reg_mode_online', title: '💻 Online' }
-    ];
-    const reply = `Great choice! *${courseName}* 🎓\n\n🏫 Onsite or 💻 Online?`;
+    await updateSession(phone, 'reg_waiting_mode', { ...session.data, course: courseName }, session.last_flow);
+    const modeButtons = [{ id: 'reg_mode_onsite', title: '🏫 Onsite' }, { id: 'reg_mode_online', title: '💻 Online' }];
+    const reply = `Great choice! *${courseName}* 🎓\n\nHow would you like to attend?`;
     await sendInteractiveButtons(phone, reply, modeButtons);
     await saveMessage(phone, name, 'outbound', reply);
     return;
   }
 
   if (session.state === 'reg_waiting_mode') {
+    // CONTEXT FIX: only accept valid reg_mode_ buttons in this state
     const modeMap = { 'reg_mode_onsite': 'Onsite', 'reg_mode_online': 'Online' };
+    if (msgType === 'interactive' && !modeMap[msgContent]) {
+      const modeButtons = [{ id: 'reg_mode_onsite', title: '🏫 Onsite' }, { id: 'reg_mode_online', title: '💻 Online' }];
+      await sendInteractiveButtons(phone, '🏫 Please select *Onsite* or 💻 *Online*:', modeButtons);
+      return;
+    }
     const mode = modeMap[msgContent] || msgContent;
     const updatedData = { ...session.data, mode };
     await saveLead({ name: updatedData.name, phone, course: updatedData.course, mode });
-    await updateSession(phone, 'idle', {});
+    await updateSession(phone, 'idle', {}, null);
     const confirmMsg = `✅ *Registration Complete!*\n\n🎊 Thank you *${updatedData.name}*!\n\n📋 *Your Details:*\n👤 Name: ${updatedData.name}\n📱 Phone: ${phone}\n📚 Course: ${updatedData.course}\n🏫 Mode: ${mode}\n\nOur team will contact you soon!\n\n📞 03142230194 | 03334429257`;
     await sendTextMessage(phone, confirmMsg);
     await saveMessage(phone, name, 'outbound', confirmMsg);
     setTimeout(async () => {
       const flow = await getBotFlow('main_menu');
-      if (flow && flow.buttons?.length > 0) await sendInteractiveButtons(phone, flow.message, flow.buttons);
+      if (flow?.buttons?.length > 0) await sendInteractiveButtons(phone, flow.message, flow.buttons);
     }, 2000);
     return;
   }
 
+  // ===== BUTTON / TEXT HANDLING WITH CONTEXT =====
   let buttonId = null;
+
   if (msgType === 'interactive') {
     buttonId = msgContent;
+    // CONTEXT FIX: if user is in a reg state but presses random button, guide them back
+    if (session.state && session.state !== 'idle' && session.state.startsWith('reg_')) {
+      await updateSession(phone, 'idle', {}, null);
+    }
   } else {
     const text = msgContent.toLowerCase().trim();
-    if (['hi', 'hello', 'start', 'menu', 'helo', 'hey', 'salam', 'assalam'].includes(text)) {
+    if (['hi', 'hello', 'start', 'menu', 'helo', 'hey', 'salam', 'assalam', 'aoa', 'welcome'].includes(text)) {
       buttonId = 'welcome';
     } else if (text === 'stop') {
       await handleOptOut(phone, name);
       return;
     } else {
+      // Unknown text — send welcome menu
       buttonId = 'welcome';
     }
   }
 
   const flow = await getBotFlow(buttonId);
   if (!flow) {
-    const reply = 'Sorry, I didn\'t understand that. Type *menu* to see options.';
+    const reply = "Sorry, I didn't understand that. Type *menu* to see options.";
     await sendTextMessage(phone, reply);
     await saveMessage(phone, name, 'outbound', reply);
     return;
   }
 
+  // Save which flow was last triggered (for context tracking)
+  await updateSession(phone, 'idle', session.data || {}, buttonId);
+
   if (flow.action === 'agent_handover') {
     await setAgentMode(phone, 1);
     await sendTextMessage(phone, flow.message);
     await saveMessage(phone, name, 'outbound', flow.message);
+    broadcast({ type: 'agent_request', phone, name });
     return;
   }
 
   if (flow.action === 'start_registration') {
-    await updateSession(phone, 'reg_waiting_name', { regPhone: phone });
+    await updateSession(phone, 'reg_waiting_name', { regPhone: phone }, buttonId);
     await sendTextMessage(phone, flow.message);
     await saveMessage(phone, name, 'outbound', flow.message);
     return;
   }
 
-  if (flow.buttons && flow.buttons.length > 0) {
+  if (flow.buttons?.length > 0) {
     await sendInteractiveButtons(phone, flow.message, flow.buttons);
   } else {
     await sendTextMessage(phone, flow.message);
@@ -386,19 +401,14 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId, m
 async function handleOptOut(phone, name) {
   const pool = getPool();
   if (pool) await pool.execute('UPDATE contacts SET status = "opted_out" WHERE phone = ?', [phone]);
-  await sendTextMessage(phone, '✅ You have been unsubscribed. Reply *START* anytime to re-subscribe.');
+  const msg = '✅ You have been unsubscribed. Reply *START* anytime to re-subscribe.';
+  await sendTextMessage(phone, msg);
 }
 
 // ==================== WEBHOOK ====================
-
 app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('✅ Webhook verified');
-    return res.status(200).send(challenge);
-  }
+  const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) return res.status(200).send(challenge);
   res.status(403).send('Forbidden');
 });
 
@@ -412,9 +422,7 @@ app.post('/webhook', async (req, res) => {
         if (change.field !== 'messages') continue;
         const value = change.value;
         if (value.statuses) {
-          for (const status of value.statuses) {
-            await updateMessageStatus(status.id, status.status);
-          }
+          for (const s of value.statuses) await updateMessageStatus(s.id, s.status);
         }
         if (value.messages) {
           for (const msg of value.messages) {
@@ -422,25 +430,19 @@ app.post('/webhook', async (req, res) => {
             const msgId = msg.id;
             const contact = value.contacts?.find(c => c.wa_id === phone);
             const name = contact?.profile?.name || phone;
-            let content = '';
-            let msgType = msg.type;
-            let mediaUrl = null;
+            let content = '', msgType = msg.type, mediaUrl = null;
 
             if (msg.type === 'text') {
               content = msg.text?.body || '';
             } else if (msg.type === 'interactive') {
-              if (msg.interactive?.type === 'button_reply') content = msg.interactive.button_reply?.id || '';
-              else if (msg.interactive?.type === 'list_reply') content = msg.interactive.list_reply?.id || '';
+              content = msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || '';
             } else if (['image', 'video', 'audio', 'document', 'voice'].includes(msg.type)) {
               const mediaObj = msg[msg.type] || {};
               content = `[${msg.type}${mediaObj.caption ? ': ' + mediaObj.caption : ''}]`;
-              // Fetch media URL from WhatsApp
               if (mediaObj.id) {
                 try {
-                  const mediaResp = await axios.get(`https://graph.facebook.com/v18.0/${mediaObj.id}`, {
-                    headers: { Authorization: `Bearer ${WA_TOKEN}` }
-                  });
-                  mediaUrl = mediaResp.data?.url || null;
+                  const mr = await axios.get(`https://graph.facebook.com/v18.0/${mediaObj.id}`, { headers: { Authorization: `Bearer ${WA_TOKEN}` } });
+                  mediaUrl = mr.data?.url || null;
                 } catch (e) { }
               }
             } else {
@@ -452,66 +454,150 @@ app.post('/webhook', async (req, res) => {
         }
       }
     }
-  } catch (err) {
-    console.error('Webhook processing error:', err.message);
-  }
+  } catch (err) { console.error('Webhook error:', err.message); }
 });
 
 async function updateMessageStatus(waId, status) {
   const pool = getPool();
   if (!pool) return;
   try {
-    await pool.execute('UPDATE messages SET status = ? WHERE whatsapp_msg_id = ?', [status, waId]);
+    await pool.execute('UPDATE messages SET status=? WHERE whatsapp_msg_id=?', [status, waId]);
     broadcast({ type: 'message_status', waId, status });
   } catch { }
 }
 
-// ==================== AUTH ROUTES ====================
-
+// ==================== AUTH ====================
+// Step 1: Login — verify credentials, send OTP
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   const pool = getPool();
-  if (!pool) {
-    if (username === (process.env.ADMIN_USERNAME || 'admin') && password === (process.env.ADMIN_PASSWORD || 'ghazala123')) {
-      const token = jwt.sign({ id: 1, username, role: 'admin' }, process.env.JWT_SECRET || 'ghazala_secret', { expiresIn: '7d' });
-      return res.json({ success: true, token, user: { username, role: 'admin', name: 'Admin' } });
-    }
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
   try {
-    const [rows] = await pool.execute('SELECT * FROM users WHERE username = ? AND is_active = 1', [username]);
-    if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
-    const user = rows[0];
-    const valid = bcrypt.compareSync(password, user.password);
-    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, process.env.JWT_SECRET || 'ghazala_secret', { expiresIn: '7d' });
+    let user = null;
+    if (!pool) {
+      if (username === (process.env.ADMIN_USERNAME || 'admin') && password === (process.env.ADMIN_PASSWORD || 'ghazala123')) {
+        user = { id: 1, username, role: 'admin', name: 'Admin', email: ADMIN_EMAIL, whatsapp: ADMIN_PHONE, two_fa_enabled: 0 };
+      }
+    } else {
+      const [rows] = await pool.execute('SELECT * FROM users WHERE username=? AND is_active=1', [username]);
+      if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
+      if (!bcrypt.compareSync(password, rows[0].password)) return res.status(401).json({ error: 'Invalid credentials' });
+      user = rows[0];
+    }
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+    // Check if 2FA enabled for this user
+    if (user.two_fa_enabled) {
+      const otp = generateOTP();
+      otpStore.set(username, { otp, expires: Date.now() + 10 * 60 * 1000, userId: user.id, purpose: 'login' });
+      let sent = false;
+      if (user.whatsapp) sent = await sendOTPWhatsApp(user.whatsapp, otp, 'Login');
+      if (!sent && user.email) sent = await sendOTPEmail(user.email, otp, 'Login');
+      return res.json({ success: true, requireOTP: true, message: 'OTP sent. Please verify.' });
+    }
+
+    // No 2FA — direct login
+    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ success: true, token, user: { username: user.username, role: user.role, name: user.name } });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== PROFILE ====================
+// Step 2: Verify OTP
+app.post('/api/verify-otp', async (req, res) => {
+  const { username, otp } = req.body;
+  const pool = getPool();
+  const stored = otpStore.get(username);
+  if (!stored) return res.status(400).json({ error: 'OTP not found or expired. Please login again.' });
+  if (Date.now() > stored.expires) { otpStore.delete(username); return res.status(400).json({ error: 'OTP expired. Please login again.' }); }
+  if (stored.otp !== otp) return res.status(400).json({ error: 'Invalid OTP' });
+  otpStore.delete(username);
 
+  try {
+    let user = null;
+    if (!pool) {
+      user = { id: 1, username, role: 'admin', name: 'Admin' };
+    } else {
+      const [rows] = await pool.execute('SELECT * FROM users WHERE username=?', [username]);
+      user = rows[0];
+    }
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ success: true, token, user: { username: user.username, role: user.role, name: user.name } });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Forgot password — send OTP to email/whatsapp
+app.post('/api/forgot-password', async (req, res) => {
+  const { username } = req.body;
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'Database not available' });
+  try {
+    const [rows] = await pool.execute('SELECT * FROM users WHERE username=? AND is_active=1', [username]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Username not found' });
+    const user = rows[0];
+    const otp = generateOTP();
+    otpStore.set('reset_' + username, { otp, expires: Date.now() + 10 * 60 * 1000, userId: user.id, purpose: 'reset' });
+    let sent = false;
+    if (user.whatsapp) sent = await sendOTPWhatsApp(user.whatsapp, otp, 'Password Reset');
+    if (!sent && user.email) sent = await sendOTPEmail(user.email, otp, 'Password Reset');
+    if (!sent) return res.status(500).json({ error: 'Could not send OTP. No email/WhatsApp set for this user.' });
+    res.json({ success: true, message: 'OTP sent to your registered email/WhatsApp.' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Reset password with OTP
+app.post('/api/reset-password', async (req, res) => {
+  const { username, otp, newPassword } = req.body;
+  const pool = getPool();
+  const stored = otpStore.get('reset_' + username);
+  if (!stored) return res.status(400).json({ error: 'OTP not found or expired.' });
+  if (Date.now() > stored.expires) { otpStore.delete('reset_' + username); return res.status(400).json({ error: 'OTP expired.' }); }
+  if (stored.otp !== otp) return res.status(400).json({ error: 'Invalid OTP' });
+  otpStore.delete('reset_' + username);
+  try {
+    const hashed = bcrypt.hashSync(newPassword, 10);
+    await pool.execute('UPDATE users SET password=? WHERE id=?', [hashed, stored.userId]);
+    res.json({ success: true, message: 'Password reset successfully.' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Send OTP for 2FA setup
+app.post('/api/send-otp', authMiddleware, async (req, res) => {
+  const { type } = req.body; // 'whatsapp' or 'email'
+  const pool = getPool();
+  try {
+    const [rows] = await pool.execute('SELECT * FROM users WHERE id=?', [req.user.id]);
+    const user = rows[0];
+    const otp = generateOTP();
+    otpStore.set('2fa_' + req.user.username, { otp, expires: Date.now() + 10 * 60 * 1000, purpose: '2fa' });
+    let sent = false;
+    if (type === 'whatsapp' && user.whatsapp) sent = await sendOTPWhatsApp(user.whatsapp, otp, '2FA Setup');
+    if (type === 'email' && user.email) sent = await sendOTPEmail(user.email, otp, '2FA Setup');
+    if (!sent) return res.status(400).json({ error: 'Could not send OTP. Check your email/WhatsApp is set in profile.' });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ==================== PROFILE ====================
 app.get('/api/profile', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json({});
   try {
-    const [rows] = await pool.execute('SELECT id, username, name, role, email, about, address, profile_pic, social_links, business_hours FROM users WHERE id = ?', [req.user.id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
-    const user = rows[0];
-    if (user.social_links) user.social_links = JSON.parse(user.social_links);
-    if (user.business_hours) user.business_hours = JSON.parse(user.business_hours);
-    res.json(user);
+    const [rows] = await pool.execute('SELECT id, username, name, role, email, whatsapp, about, address, profile_pic, social_links, business_hours, two_fa_enabled FROM users WHERE id=?', [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const u = rows[0];
+    if (u.social_links) try { u.social_links = JSON.parse(u.social_links); } catch { u.social_links = {}; }
+    if (u.business_hours) try { u.business_hours = JSON.parse(u.business_hours); } catch { u.business_hours = {}; }
+    res.json(u);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put('/api/profile', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
-  const { name, email, about, address, profile_pic, social_links, business_hours } = req.body;
+  const { name, email, whatsapp, about, address, profile_pic, social_links, business_hours } = req.body;
   try {
-    await pool.execute(`
-      UPDATE users SET name=?, email=?, about=?, address=?, profile_pic=?, social_links=?, business_hours=? WHERE id=?
-    `, [name, email, about, address, profile_pic, JSON.stringify(social_links), JSON.stringify(business_hours), req.user.id]);
+    await pool.execute('UPDATE users SET name=?,email=?,whatsapp=?,about=?,address=?,profile_pic=?,social_links=?,business_hours=? WHERE id=?',
+      [name, email, whatsapp, about, address, profile_pic, JSON.stringify(social_links || {}), JSON.stringify(business_hours || {}), req.user.id]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -521,52 +607,62 @@ app.put('/api/profile/password', authMiddleware, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { currentPassword, newPassword } = req.body;
   try {
-    const [rows] = await pool.execute('SELECT password FROM users WHERE id = ?', [req.user.id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
-    const valid = bcrypt.compareSync(currentPassword, rows[0].password);
-    if (!valid) return res.status(401).json({ error: 'Current password incorrect' });
-    const hashed = bcrypt.hashSync(newPassword, 10);
-    await pool.execute('UPDATE users SET password = ? WHERE id = ?', [hashed, req.user.id]);
+    const [rows] = await pool.execute('SELECT password FROM users WHERE id=?', [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    if (!bcrypt.compareSync(currentPassword, rows[0].password)) return res.status(401).json({ error: 'Current password incorrect' });
+    await pool.execute('UPDATE users SET password=? WHERE id=?', [bcrypt.hashSync(newPassword, 10), req.user.id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/profile/2fa', authMiddleware, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'No DB' });
+  const { enabled, otp } = req.body;
+  // Verify OTP before enabling 2FA
+  if (enabled) {
+    const stored = otpStore.get('2fa_' + req.user.username);
+    if (!stored || stored.otp !== otp || Date.now() > stored.expires) {
+      return res.status(400).json({ error: 'Invalid or expired OTP. Please request a new one.' });
+    }
+    otpStore.delete('2fa_' + req.user.username);
+  }
+  try {
+    await pool.execute('UPDATE users SET two_fa_enabled=? WHERE id=?', [enabled ? 1 : 0, req.user.id]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==================== STATS ====================
-
 app.get('/api/stats', authMiddleware, async (req, res) => {
   const pool = getPool();
-  if (!pool) return res.json({ messages: 0, contacts: 0, leads: 0, broadcasts: 0 });
+  if (!pool) return res.json({ messages: 0, contacts: 0, leads: 0, broadcasts: 0, todayMessages: 0, todayLeads: 0 });
   try {
-    const [[msgCount]] = await pool.execute('SELECT COUNT(*) as count FROM messages');
-    const [[contactCount]] = await pool.execute('SELECT COUNT(*) as count FROM contacts WHERE status = "active"');
-    const [[leadCount]] = await pool.execute('SELECT COUNT(*) as count FROM leads');
-    const [[broadcastCount]] = await pool.execute('SELECT COUNT(*) as count FROM broadcasts');
-    const [[todayMsgs]] = await pool.execute('SELECT COUNT(*) as count FROM messages WHERE DATE(created_at) = CURDATE()');
-    const [[newLeads]] = await pool.execute('SELECT COUNT(*) as count FROM leads WHERE DATE(created_at) = CURDATE()');
-    res.json({
-      messages: msgCount.count, contacts: contactCount.count,
-      leads: leadCount.count, broadcasts: broadcastCount.count,
-      todayMessages: todayMsgs.count, todayLeads: newLeads.count
-    });
+    const [[m]] = await pool.execute('SELECT COUNT(*) as c FROM messages');
+    const [[co]] = await pool.execute('SELECT COUNT(*) as c FROM contacts WHERE status="active"');
+    const [[l]] = await pool.execute('SELECT COUNT(*) as c FROM leads');
+    const [[b]] = await pool.execute('SELECT COUNT(*) as c FROM broadcasts');
+    const [[tm]] = await pool.execute('SELECT COUNT(*) as c FROM messages WHERE DATE(created_at)=CURDATE()');
+    const [[tl]] = await pool.execute('SELECT COUNT(*) as c FROM leads WHERE DATE(created_at)=CURDATE()');
+    res.json({ messages: m.c, contacts: co.c, leads: l.c, broadcasts: b.c, todayMessages: tm.c, todayLeads: tl.c });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==================== CONTACTS ====================
-
 app.get('/api/contacts', authMiddleware, async (req, res) => {
   const pool = getPool();
-  if (!pool) return res.json([]);
+  if (!pool) return res.json({ contacts: [], total: 0 });
   try {
     const { search, segment, status, page = 1, limit = 50 } = req.query;
-    let query = 'SELECT * FROM contacts WHERE 1=1';
-    const params = [];
-    if (search) { query += ' AND (name LIKE ? OR phone LIKE ?)'; params.push(`%${search}%`, `%${search}%`); }
-    if (segment) { query += ' AND segment = ?'; params.push(segment); }
-    if (status) { query += ' AND status = ?'; params.push(status); }
-    query += ' ORDER BY last_message DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
-    const [rows] = await pool.execute(query, params);
-    const [[{ total }]] = await pool.execute('SELECT COUNT(*) as total FROM contacts WHERE 1=1');
+    let q = 'SELECT * FROM contacts WHERE 1=1', p = [];
+    if (search) { q += ' AND (name LIKE ? OR phone LIKE ?)'; p.push(`%${search}%`, `%${search}%`); }
+    if (segment) { q += ' AND segment=?'; p.push(segment); }
+    if (status) { q += ' AND status=?'; p.push(status); }
+    const countQ = q.replace('SELECT *', 'SELECT COUNT(*) as total');
+    const [[{ total }]] = await pool.execute(countQ, p);
+    q += ' ORDER BY last_message DESC LIMIT ? OFFSET ?';
+    p.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+    const [rows] = await pool.execute(q, p);
     res.json({ contacts: rows, total });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -574,9 +670,9 @@ app.get('/api/contacts', authMiddleware, async (req, res) => {
 app.post('/api/contacts', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
+  const { name, phone, segment } = req.body;
   try {
-    const { name, phone, segment } = req.body;
-    await pool.execute('INSERT IGNORE INTO contacts (name, phone, segment) VALUES (?, ?, ?)', [name, phone, segment || 'General']);
+    await pool.execute('INSERT IGNORE INTO contacts (name, phone, segment) VALUES (?,?,?)', [name, phone, segment || 'General']);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -586,62 +682,60 @@ app.post('/api/contacts/import', authMiddleware, upload.single('file'), async (r
   if (!pool) return res.status(500).json({ error: 'No DB' });
   if (!req.file) return res.status(400).json({ error: 'No file' });
   const results = [];
-  fs.createReadStream(req.file.path)
-    .pipe(csv())
-    .on('data', (data) => results.push(data))
-    .on('end', async () => {
-      let imported = 0, failed = 0;
-      for (const row of results) {
-        const phone = row.phone || row.Phone || row.number || row.Number || row.mobile || row.Mobile;
-        const name = row.name || row.Name || '';
-        const segment = row.segment || row.Segment || 'Imported';
-        if (phone) {
-          try {
-            await pool.execute('INSERT IGNORE INTO contacts (name, phone, segment) VALUES (?, ?, ?)', [name, phone.toString().trim(), segment]);
-            imported++;
-          } catch { failed++; }
-        }
+  fs.createReadStream(req.file.path).pipe(csv()).on('data', d => results.push(d)).on('end', async () => {
+    let imported = 0, failed = 0;
+    for (const row of results) {
+      const phone = (row.phone || row.Phone || row.number || row.Number || row.mobile || row.Mobile || '').toString().trim();
+      const name = row.name || row.Name || '';
+      const segment = row.segment || row.Segment || 'Imported';
+      if (phone) {
+        try { await pool.execute('INSERT IGNORE INTO contacts (name, phone, segment) VALUES (?,?,?)', [name, phone, segment]); imported++; }
+        catch { failed++; }
       }
-      fs.unlink(req.file.path, () => { });
-      res.json({ success: true, imported, failed });
-    });
+    }
+    fs.unlink(req.file.path, () => { });
+    res.json({ success: true, imported, failed });
+  });
 });
 
-// Get contacts by segment for broadcast
 app.get('/api/contacts/segment/:seg', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
   try {
     const seg = req.params.seg;
-    let query = 'SELECT * FROM contacts WHERE status = "active"';
-    const params = [];
-    if (seg !== 'all') {
-      if (seg === 'new_leads') {
-        const [leads] = await pool.execute('SELECT phone, name FROM leads WHERE status = "new"');
-        return res.json(leads);
-      }
-      query += ' AND segment = ?';
-      params.push(seg);
+    if (seg === 'new_leads') {
+      const [leads] = await pool.execute('SELECT phone, name FROM leads WHERE status="new"');
+      return res.json(leads);
     }
-    const [rows] = await pool.execute(query, params);
+    let q = 'SELECT * FROM contacts WHERE status="active"', p = [];
+    if (seg !== 'all') { q += ' AND segment=?'; p.push(seg); }
+    const [rows] = await pool.execute(q, p);
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== CHAT / MESSAGES ====================
+app.delete('/api/contacts/:id', authMiddleware, adminOnly, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'No DB' });
+  try {
+    await pool.execute('DELETE FROM contacts WHERE id=?', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
+// ==================== CHAT ====================
 app.get('/api/chats', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
   try {
     const [rows] = await pool.execute(`
       SELECT c.*,
-        (SELECT content FROM messages WHERE contact_phone = c.phone ORDER BY created_at DESC LIMIT 1) as last_msg,
-        (SELECT message_type FROM messages WHERE contact_phone = c.phone ORDER BY created_at DESC LIMIT 1) as last_msg_type,
-        (SELECT created_at FROM messages WHERE contact_phone = c.phone ORDER BY created_at DESC LIMIT 1) as last_msg_time,
-        (SELECT COUNT(*) FROM messages WHERE contact_phone = c.phone AND direction = 'inbound' AND created_at > COALESCE(c.last_message, '2000-01-01')) as unread,
-        (SELECT agent_mode FROM bot_sessions WHERE phone = c.phone) as agent_mode
-      FROM contacts c WHERE c.status = 'active'
+        (SELECT content FROM messages WHERE contact_phone=c.phone ORDER BY created_at DESC LIMIT 1) as last_msg,
+        (SELECT message_type FROM messages WHERE contact_phone=c.phone ORDER BY created_at DESC LIMIT 1) as last_msg_type,
+        (SELECT created_at FROM messages WHERE contact_phone=c.phone ORDER BY created_at DESC LIMIT 1) as last_msg_time,
+        (SELECT COUNT(*) FROM messages WHERE contact_phone=c.phone AND direction='inbound' AND created_at > COALESCE(c.last_message,'2000-01-01')) as unread,
+        (SELECT agent_mode FROM bot_sessions WHERE phone=c.phone) as agent_mode
+      FROM contacts c WHERE c.status='active'
       ORDER BY last_msg_time DESC LIMIT 100
     `);
     res.json(rows);
@@ -652,10 +746,7 @@ app.get('/api/chats/:phone', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
   try {
-    const [rows] = await pool.execute(
-      'SELECT * FROM messages WHERE contact_phone = ? ORDER BY created_at ASC LIMIT 200',
-      [req.params.phone]
-    );
+    const [rows] = await pool.execute('SELECT * FROM messages WHERE contact_phone=? ORDER BY created_at ASC LIMIT 300', [req.params.phone]);
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -683,99 +774,70 @@ app.post('/api/chats/:phone/agent', authMiddleware, async (req, res) => {
     await setAgentMode(phone, agentMode ? 1 : 0);
     if (!agentMode) {
       const flow = await getBotFlow('welcome');
-      if (flow && flow.buttons?.length > 0) {
-        await sendInteractiveButtons(phone, flow.message, flow.buttons);
-        await saveMessage(phone, null, 'outbound', flow.message);
-      }
+      if (flow?.buttons?.length > 0) { await sendInteractiveButtons(phone, flow.message, flow.buttons); await saveMessage(phone, null, 'outbound', flow.message); }
     } else {
       const msg = '🤝 An agent has joined the chat. How can we help you?';
-      await sendTextMessage(phone, msg);
-      await saveMessage(phone, null, 'outbound', msg);
+      await sendTextMessage(phone, msg); await saveMessage(phone, null, 'outbound', msg);
     }
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==================== BROADCAST ====================
-
 app.post('/api/broadcast', authMiddleware, async (req, res) => {
   const pool = getPool();
   const { name, templateName, variables, segment, phones } = req.body;
   let contactList = [];
-  if (phones && phones.length > 0) {
+  if (phones?.length > 0) {
     contactList = phones.map(p => ({ phone: p.phone || p, name: p.name || '' }));
   } else if (pool) {
-    let query = 'SELECT phone, name FROM contacts WHERE status = "active"';
-    const params = [];
-    if (segment && segment !== 'all') {
-      if (segment === 'new_leads') {
-        const [leads] = await pool.execute('SELECT phone, name FROM leads WHERE status = "new"');
-        contactList = leads;
-      } else {
-        query += ' AND segment = ?';
-        params.push(segment);
-        const [rows] = await pool.execute(query, params);
-        contactList = rows;
-      }
+    if (segment === 'new_leads') {
+      const [leads] = await pool.execute('SELECT phone, name FROM leads WHERE status="new"');
+      contactList = leads;
     } else {
-      const [rows] = await pool.execute(query, params);
+      let q = 'SELECT phone, name FROM contacts WHERE status="active"', p = [];
+      if (segment && segment !== 'all') { q += ' AND segment=?'; p.push(segment); }
+      const [rows] = await pool.execute(q, p);
       contactList = rows;
     }
   }
-  if (contactList.length === 0) return res.status(400).json({ error: 'No contacts found' });
+  if (!contactList.length) return res.status(400).json({ error: 'No contacts found' });
   let broadcastId = null;
   if (pool) {
-    const [result] = await pool.execute(
-      'INSERT INTO broadcasts (name, template_name, template_variables, segment, total_contacts, status) VALUES (?, ?, ?, ?, ?, "sending")',
-      [name, templateName, JSON.stringify(variables), segment || 'all', contactList.length]
-    );
-    broadcastId = result.insertId;
+    const [r] = await pool.execute('INSERT INTO broadcasts (name, template_name, template_variables, segment, total_contacts, status) VALUES (?,?,?,?,?,"sending")',
+      [name, templateName, JSON.stringify(variables), segment || 'all', contactList.length]);
+    broadcastId = r.insertId;
   }
-  res.json({ success: true, broadcastId, totalContacts: contactList.length, message: 'Broadcast started' });
+  res.json({ success: true, broadcastId, totalContacts: contactList.length });
 
   (async () => {
     let sent = 0, failed = 0;
     for (const contact of contactList) {
-      const finalVars = variables.map((v, i) => {
-        if (i === 0 && (!v || v === '{{name}}' || v === '{name}')) return contact.name || 'Student';
-        return v || '';
-      });
+      const finalVars = variables.map((v, i) => (i === 0 && (!v || v === '{{name}}')) ? (contact.name || 'Student') : (v || ''));
       const result = await sendTemplate(contact.phone, templateName, finalVars);
       if (result.success) {
         sent++;
-        if (pool) {
-          await pool.execute('INSERT INTO broadcast_logs (broadcast_id, phone, name, status) VALUES (?, ?, ?, "sent")', [broadcastId, contact.phone, contact.name]);
-          await saveMessage(contact.phone, contact.name, 'outbound', `[Template: ${templateName}]`);
-        }
+        if (pool) { await pool.execute('INSERT INTO broadcast_logs (broadcast_id, phone, name, status) VALUES (?,?,?,"sent")', [broadcastId, contact.phone, contact.name]); await saveMessage(contact.phone, contact.name, 'outbound', `[Template: ${templateName}]`); }
       } else {
         failed++;
-        if (pool) {
-          await pool.execute('INSERT INTO broadcast_logs (broadcast_id, phone, name, status, error_msg) VALUES (?, ?, ?, "failed", ?)', [broadcastId, contact.phone, contact.name, result.error]);
-        }
+        if (pool) await pool.execute('INSERT INTO broadcast_logs (broadcast_id, phone, name, status, error_msg) VALUES (?,?,?,"failed",?)', [broadcastId, contact.phone, contact.name, result.error]);
       }
-      if (pool && broadcastId) {
-        await pool.execute('UPDATE broadcasts SET sent = ?, failed = ? WHERE id = ?', [sent, failed, broadcastId]);
-        broadcast({ type: 'broadcast_progress', broadcastId, sent, failed, total: contactList.length });
-      }
+      if (pool && broadcastId) { await pool.execute('UPDATE broadcasts SET sent=?, failed=? WHERE id=?', [sent, failed, broadcastId]); }
+      broadcast({ type: 'broadcast_progress', broadcastId, sent, failed, total: contactList.length });
       await new Promise(r => setTimeout(r, 150));
     }
-    if (pool && broadcastId) {
-      await pool.execute('UPDATE broadcasts SET status = "completed", completed_at = NOW() WHERE id = ?', [broadcastId]);
-      broadcast({ type: 'broadcast_complete', broadcastId, sent, failed });
-    }
-    console.log(`✅ Broadcast complete: ${sent} sent, ${failed} failed`);
+    if (pool && broadcastId) await pool.execute('UPDATE broadcasts SET status="completed", completed_at=NOW() WHERE id=?', [broadcastId]);
+    broadcast({ type: 'broadcast_complete', broadcastId, sent, failed });
   })();
 });
 
-// Resend failed broadcast
 app.post('/api/broadcasts/:id/resend-failed', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
   try {
-    const [broadcast] = await pool.execute('SELECT * FROM broadcasts WHERE id = ?', [req.params.id]);
-    if (!broadcast.length) return res.status(404).json({ error: 'Broadcast not found' });
-    const b = broadcast[0];
-    const [failed] = await pool.execute('SELECT * FROM broadcast_logs WHERE broadcast_id = ? AND status = "failed"', [req.params.id]);
+    const [[b]] = await pool.execute('SELECT * FROM broadcasts WHERE id=?', [req.params.id]);
+    if (!b) return res.status(404).json({ error: 'Not found' });
+    const [failed] = await pool.execute('SELECT * FROM broadcast_logs WHERE broadcast_id=? AND status="failed"', [req.params.id]);
     if (!failed.length) return res.json({ success: true, message: 'No failed messages' });
     const variables = JSON.parse(b.template_variables || '[]');
     res.json({ success: true, message: `Resending to ${failed.length} contacts` });
@@ -783,11 +845,10 @@ app.post('/api/broadcasts/:id/resend-failed', authMiddleware, async (req, res) =
       for (const log of failed) {
         const finalVars = variables.map((v, i) => i === 0 ? (log.name || 'Student') : v);
         const result = await sendTemplate(log.phone, b.template_name, finalVars);
-        await pool.execute('UPDATE broadcast_logs SET status = ?, error_msg = ? WHERE id = ?',
-          [result.success ? 'sent' : 'failed', result.success ? null : result.error, log.id]);
+        await pool.execute('UPDATE broadcast_logs SET status=?, error_msg=? WHERE id=?', [result.success ? 'sent' : 'failed', result.success ? null : result.error, log.id]);
         await new Promise(r => setTimeout(r, 150));
       }
-      await pool.execute('UPDATE broadcasts SET failed = (SELECT COUNT(*) FROM broadcast_logs WHERE broadcast_id = ? AND status = "failed"), sent = (SELECT COUNT(*) FROM broadcast_logs WHERE broadcast_id = ? AND status = "sent") WHERE id = ?', [b.id, b.id, b.id]);
+      await pool.execute('UPDATE broadcasts SET sent=(SELECT COUNT(*) FROM broadcast_logs WHERE broadcast_id=? AND status="sent"), failed=(SELECT COUNT(*) FROM broadcast_logs WHERE broadcast_id=? AND status="failed") WHERE id=?', [b.id, b.id, b.id]);
     })();
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -795,18 +856,16 @@ app.post('/api/broadcasts/:id/resend-failed', authMiddleware, async (req, res) =
 app.get('/api/broadcasts', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
-  try {
-    const [rows] = await pool.execute('SELECT * FROM broadcasts ORDER BY created_at DESC LIMIT 50');
-    res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { const [rows] = await pool.execute('SELECT * FROM broadcasts ORDER BY created_at DESC LIMIT 50'); res.json(rows); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/broadcasts/:id', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json({});
   try {
-    const [rows] = await pool.execute('SELECT * FROM broadcasts WHERE id = ?', [req.params.id]);
-    const [logs] = await pool.execute('SELECT * FROM broadcast_logs WHERE broadcast_id = ? ORDER BY created_at DESC', [req.params.id]);
+    const [rows] = await pool.execute('SELECT * FROM broadcasts WHERE id=?', [req.params.id]);
+    const [logs] = await pool.execute('SELECT * FROM broadcast_logs WHERE broadcast_id=? ORDER BY created_at DESC', [req.params.id]);
     res.json({ ...(rows[0] || {}), logs });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -814,41 +873,38 @@ app.get('/api/broadcasts/:id', authMiddleware, async (req, res) => {
 app.get('/api/broadcasts/:id/progress', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json({});
-  try {
-    const [rows] = await pool.execute('SELECT * FROM broadcasts WHERE id = ?', [req.params.id]);
-    res.json(rows[0] || {});
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { const [rows] = await pool.execute('SELECT * FROM broadcasts WHERE id=?', [req.params.id]); res.json(rows[0] || {}); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==================== TEMPLATES ====================
-
 app.get('/api/templates', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
   try {
-    const [rows] = await pool.execute('SELECT * FROM templates WHERE is_active = 1');
-    rows.forEach(r => { r.variables = typeof r.variables === 'string' ? JSON.parse(r.variables) : r.variables; });
+    const [rows] = await pool.execute('SELECT * FROM templates WHERE is_active=1');
+    rows.forEach(r => { try { r.variables = typeof r.variables === 'string' ? JSON.parse(r.variables) : r.variables; } catch { r.variables = []; } });
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/templates', authMiddleware, async (req, res) => {
+app.post('/api/templates', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { name, template_name, category, variables, body } = req.body;
   try {
-    await pool.execute('INSERT INTO templates (name, template_name, category, variables, body) VALUES (?, ?, ?, ?, ?)',
+    await pool.execute('INSERT INTO templates (name, template_name, category, variables, body) VALUES (?,?,?,?,?)',
       [name, template_name, category, JSON.stringify(variables), body]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.put('/api/templates/:id', authMiddleware, async (req, res) => {
+app.put('/api/templates/:id', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { name, template_name, category, variables, body } = req.body;
   try {
-    await pool.execute('UPDATE templates SET name=?, template_name=?, category=?, variables=?, body=? WHERE id=?',
+    await pool.execute('UPDATE templates SET name=?,template_name=?,category=?,variables=?,body=? WHERE id=?',
       [name, template_name, category, JSON.stringify(variables), body, req.params.id]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -857,25 +913,22 @@ app.put('/api/templates/:id', authMiddleware, async (req, res) => {
 app.delete('/api/templates/:id', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
-  try {
-    await pool.execute('UPDATE templates SET is_active = 0 WHERE id = ?', [req.params.id]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { await pool.execute('UPDATE templates SET is_active=0 WHERE id=?', [req.params.id]); res.json({ success: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==================== BOT FLOWS ====================
-
 app.get('/api/bot-flows', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
   try {
     const [rows] = await pool.execute('SELECT * FROM bot_flows ORDER BY id ASC');
-    rows.forEach(r => { r.buttons = typeof r.buttons === 'string' ? JSON.parse(r.buttons) : r.buttons; });
+    rows.forEach(r => { try { r.buttons = typeof r.buttons === 'string' ? JSON.parse(r.buttons) : r.buttons; } catch { r.buttons = []; } });
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.put('/api/bot-flows/:id', authMiddleware, async (req, res) => {
+app.put('/api/bot-flows/:id', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { message, buttons, is_active } = req.body;
@@ -886,12 +939,12 @@ app.put('/api/bot-flows/:id', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/bot-flows', authMiddleware, async (req, res) => {
+app.post('/api/bot-flows', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { trigger_key, message, buttons, action } = req.body;
   try {
-    await pool.execute('INSERT INTO bot_flows (trigger_key, message, buttons, action) VALUES (?, ?, ?, ?)',
+    await pool.execute('INSERT INTO bot_flows (trigger_key, message, buttons, action) VALUES (?,?,?,?)',
       [trigger_key, message, JSON.stringify(buttons), action]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -900,29 +953,25 @@ app.post('/api/bot-flows', authMiddleware, async (req, res) => {
 app.delete('/api/bot-flows/:id', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
-  try {
-    await pool.execute('DELETE FROM bot_flows WHERE id = ?', [req.params.id]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { await pool.execute('DELETE FROM bot_flows WHERE id=?', [req.params.id]); res.json({ success: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==================== LEADS ====================
-
 app.get('/api/leads', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
   try {
     const { course, mode, status, from, to, search } = req.query;
-    let query = 'SELECT * FROM leads WHERE 1=1';
-    const params = [];
-    if (course) { query += ' AND course = ?'; params.push(course); }
-    if (mode) { query += ' AND mode = ?'; params.push(mode); }
-    if (status) { query += ' AND status = ?'; params.push(status); }
-    if (from) { query += ' AND DATE(created_at) >= ?'; params.push(from); }
-    if (to) { query += ' AND DATE(created_at) <= ?'; params.push(to); }
-    if (search) { query += ' AND (name LIKE ? OR phone LIKE ?)'; params.push(`%${search}%`, `%${search}%`); }
-    query += ' ORDER BY created_at DESC LIMIT 200';
-    const [rows] = await pool.execute(query, params);
+    let q = 'SELECT * FROM leads WHERE 1=1', p = [];
+    if (course) { q += ' AND course=?'; p.push(course); }
+    if (mode) { q += ' AND mode=?'; p.push(mode); }
+    if (status) { q += ' AND status=?'; p.push(status); }
+    if (from) { q += ' AND DATE(created_at)>=?'; p.push(from); }
+    if (to) { q += ' AND DATE(created_at)<=?'; p.push(to); }
+    if (search) { q += ' AND (name LIKE ? OR phone LIKE ?)'; p.push(`%${search}%`, `%${search}%`); }
+    q += ' ORDER BY created_at DESC LIMIT 200';
+    const [rows] = await pool.execute(q, p);
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -931,14 +980,11 @@ app.put('/api/leads/:id', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { status, notes } = req.body;
-  try {
-    await pool.execute('UPDATE leads SET status=?, notes=? WHERE id=?', [status, notes, req.params.id]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { await pool.execute('UPDATE leads SET status=?, notes=? WHERE id=?', [status, notes, req.params.id]); res.json({ success: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==================== SETTINGS ====================
-
 app.get('/api/settings', authMiddleware, (req, res) => {
   res.json({
     phoneNumberId: PHONE_ID ? '••••' + PHONE_ID.slice(-4) : 'Not set',
@@ -948,24 +994,22 @@ app.get('/api/settings', authMiddleware, (req, res) => {
   });
 });
 
-// ==================== USERS / AGENTS ====================
-
-app.get('/api/users', authMiddleware, async (req, res) => {
+// ==================== USERS ====================
+app.get('/api/users', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
-  try {
-    const [rows] = await pool.execute('SELECT id, username, name, role, is_active, created_at FROM users');
-    res.json(rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { const [rows] = await pool.execute('SELECT id, username, name, role, email, whatsapp, is_active, two_fa_enabled, created_at FROM users'); res.json(rows); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/users', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
-  const { username, password, name, role } = req.body;
+  const { username, password, name, role, email, whatsapp } = req.body;
   try {
     const hashed = bcrypt.hashSync(password, 10);
-    await pool.execute('INSERT INTO users (username, password, name, role) VALUES (?, ?, ?, ?)', [username, hashed, name, role || 'agent']);
+    await pool.execute('INSERT INTO users (username, password, name, role, email, whatsapp) VALUES (?,?,?,?,?,?)',
+      [username, hashed, name, role || 'agent', email || null, whatsapp || null]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -973,23 +1017,21 @@ app.post('/api/users', authMiddleware, adminOnly, async (req, res) => {
 app.put('/api/users/:id', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
-  const { name, role, is_active, password } = req.body;
+  const { name, role, is_active, password, email, whatsapp } = req.body;
   try {
     if (password) {
-      const hashed = bcrypt.hashSync(password, 10);
-      await pool.execute('UPDATE users SET name=?, role=?, is_active=?, password=? WHERE id=?', [name, role, is_active, hashed, req.params.id]);
+      await pool.execute('UPDATE users SET name=?,role=?,is_active=?,password=?,email=?,whatsapp=? WHERE id=?',
+        [name, role, is_active, bcrypt.hashSync(password, 10), email, whatsapp, req.params.id]);
     } else {
-      await pool.execute('UPDATE users SET name=?, role=?, is_active=? WHERE id=?', [name, role, is_active, req.params.id]);
+      await pool.execute('UPDATE users SET name=?,role=?,is_active=?,email=?,whatsapp=? WHERE id=?',
+        [name, role, is_active, email, whatsapp, req.params.id]);
     }
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ==================== HEALTH ====================
-
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString(), db: !!getPool() });
-});
+app.get('/api/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString(), db: !!getPool() }));
 
 // Serve frontend
 app.get('*', (req, res) => {
@@ -998,15 +1040,18 @@ app.get('*', (req, res) => {
   }
 });
 
-// ==================== START ====================
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Global error:', err.message);
+  res.status(500).json({ error: 'Server error', message: err.message });
+});
 
 async function start() {
   await initDB();
   server.listen(PORT, () => {
-    console.log(`🚀 Ghazala WhatsApp System running on port ${PORT}`);
+    console.log(`🚀 Ghazala WhatsApp System on port ${PORT}`);
     console.log(`📊 Dashboard: http://localhost:${PORT}`);
     console.log(`🔗 Webhook: http://localhost:${PORT}/webhook`);
-    console.log(`🔌 WebSocket: ws://localhost:${PORT}`);
   });
 }
 
