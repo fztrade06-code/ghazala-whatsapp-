@@ -6,7 +6,7 @@ const dbConfig = {
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'ghazala_whatsapp',
-  port: process.env.DB_PORT || 3306,
+  port: parseInt(process.env.DB_PORT || '3306'),
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
@@ -16,26 +16,17 @@ let pool;
 
 async function initDB() {
   try {
-    // First connect without database to create it
     const tempConn = await mysql.createConnection({
-      host: dbConfig.host,
-      user: dbConfig.user,
-      password: dbConfig.password,
-      port: dbConfig.port
+      host: dbConfig.host, user: dbConfig.user,
+      password: dbConfig.password, port: dbConfig.port
     });
-
     await tempConn.execute(`CREATE DATABASE IF NOT EXISTS \`${dbConfig.database}\``);
     await tempConn.end();
-
-    // Now connect with database
     pool = mysql.createPool(dbConfig);
-
-    // Create all tables
     await createTables();
     console.log('✅ Database connected and tables ready');
   } catch (err) {
     console.error('❌ Database error:', err.message);
-    // Use in-memory fallback for testing without DB
     pool = null;
   }
 }
@@ -43,7 +34,6 @@ async function initDB() {
 async function createTables() {
   const conn = await pool.getConnection();
   try {
-    // Contacts table
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS contacts (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -56,7 +46,6 @@ async function createTables() {
       )
     `);
 
-    // Messages / Chat table
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS messages (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -64,6 +53,7 @@ async function createTables() {
         contact_name VARCHAR(255),
         direction ENUM('inbound','outbound') NOT NULL,
         message_type VARCHAR(50) DEFAULT 'text',
+        media_url TEXT,
         content TEXT,
         status VARCHAR(50) DEFAULT 'sent',
         whatsapp_msg_id VARCHAR(255),
@@ -73,13 +63,13 @@ async function createTables() {
       )
     `);
 
-    // Bot sessions table
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS bot_sessions (
         id INT AUTO_INCREMENT PRIMARY KEY,
         phone VARCHAR(20) UNIQUE NOT NULL,
         state VARCHAR(100) DEFAULT 'idle',
         data JSON,
+        last_flow VARCHAR(100) DEFAULT NULL,
         agent_mode TINYINT DEFAULT 0,
         agent_id INT DEFAULT NULL,
         last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -87,7 +77,11 @@ async function createTables() {
       )
     `);
 
-    // Leads / Form data table
+    // Add last_flow column if upgrading
+    try {
+      await conn.execute('ALTER TABLE bot_sessions ADD COLUMN last_flow VARCHAR(100) DEFAULT NULL');
+    } catch (e) { /* already exists */ }
+
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS leads (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -104,7 +98,6 @@ async function createTables() {
       )
     `);
 
-    // Broadcasts table
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS broadcasts (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -122,7 +115,6 @@ async function createTables() {
       )
     `);
 
-    // Broadcast logs
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS broadcast_logs (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -136,7 +128,6 @@ async function createTables() {
       )
     `);
 
-    // Bot flows (editable from dashboard)
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS bot_flows (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -149,7 +140,6 @@ async function createTables() {
       )
     `);
 
-    // Templates
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS templates (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -163,7 +153,6 @@ async function createTables() {
       )
     `);
 
-    // Agents / Users
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS users (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -171,23 +160,39 @@ async function createTables() {
         password VARCHAR(255) NOT NULL,
         role ENUM('admin','agent') DEFAULT 'agent',
         name VARCHAR(255),
+        email VARCHAR(255),
+        whatsapp VARCHAR(20),
+        about TEXT,
+        address TEXT,
+        profile_pic TEXT,
+        social_links JSON,
+        business_hours JSON,
+        two_fa_enabled TINYINT DEFAULT 0,
         is_active TINYINT DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    // Insert default admin
+    // Add new columns if upgrading existing users table
+    const newCols = ['email VARCHAR(255)', 'whatsapp VARCHAR(20)', 'about TEXT', 'address TEXT', 'profile_pic TEXT', 'social_links JSON', 'business_hours JSON', 'two_fa_enabled TINYINT DEFAULT 0'];
+    for (const col of newCols) {
+      try { await conn.execute(`ALTER TABLE users ADD COLUMN ${col}`); } catch (e) { /* already exists */ }
+    }
+
+    // Default admin
     const bcrypt = require('bcryptjs');
     const adminPass = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'ghazala123', 10);
     await conn.execute(`
-      INSERT IGNORE INTO users (username, password, role, name) 
-      VALUES (?, ?, 'admin', 'Admin')
-    `, [process.env.ADMIN_USERNAME || 'admin', adminPass]);
+      INSERT IGNORE INTO users (username, password, role, name, email, whatsapp)
+      VALUES (?, ?, 'admin', 'Admin', ?, ?)
+    `, [
+      process.env.ADMIN_USERNAME || 'admin',
+      adminPass,
+      process.env.ADMIN_EMAIL || '',
+      process.env.ADMIN_WHATSAPP || ''
+    ]);
 
-    // Insert default templates
     await insertDefaultTemplates(conn);
-
-    // Insert default bot flows
     await insertDefaultBotFlows(conn);
 
   } finally {
@@ -198,25 +203,18 @@ async function createTables() {
 async function insertDefaultTemplates(conn) {
   const templates = [
     {
-      name: 'Batch Schedule',
-      template_name: 'ghazala_batch_schedule',
+      name: 'Welcome Message',
+      template_name: 'ghazala_welcome',
       category: 'MARKETING',
-      variables: JSON.stringify(['Student Name', 'Course Name', 'Batch Timings', 'Start Date']),
-      body: 'Hi {{1}}! 👋\n\nJust wanted to share the latest batch timings for *{{2}}* — in case you\'ve been waiting for the right slot!\n\n🗓️ *Upcoming Batches:*\n{{3}}\n\n📅 *Starting from:* {{4}}\n\nSpots fill up fast!\n\n📞 03142230194 | 03334429257'
+      variables: JSON.stringify(['Student Name']),
+      body: 'Hi {{1}}! 👋\n\nWelcome to *Ghazala Institute* — your gateway to language mastery and international education! 🌍\n\nWe offer:\n🇩🇪 German Language\n📝 IELTS Preparation\n💻 PTE Preparation\n🎤 Spoken English\n✈️ Study Abroad Consultancy\n\nReply *menu* to explore our courses!\n\n📞 03142230194 | 03334429257'
     },
     {
-      name: 'Fee Structure',
-      template_name: 'ghazala_fee_structure',
+      name: 'Fee Details',
+      template_name: 'ghazala_fee_details',
       category: 'MARKETING',
       variables: JSON.stringify(['Student Name', 'Course Name', 'Fee Details', 'Inclusions']),
       body: 'Hi {{1}}! 😊\n\nHere\'s the fee breakdown for *{{2}}*:\n\n💰 {{3}}\n\n✅ {{4}}\n✅ No hidden charges.\n\nRegistration: Rs. 2,000 (non-refundable)\n\n📞 03142230194 | 03334429257'
-    },
-    {
-      name: 'Feedback Request',
-      template_name: 'ghazala_feedback',
-      category: 'UTILITY',
-      variables: JSON.stringify(['Student Name', 'Course Name']),
-      body: 'Hi {{1}}! 🌟\n\nYou\'ve been with us in the *{{2}}* course — your opinion means a lot!\n\nHow\'s the experience been? Just reply to this message. 🙏\n\nThanks for being part of the Ghazala family!'
     },
     {
       name: 'Course Follow-up',
@@ -237,15 +235,12 @@ async function insertDefaultTemplates(conn) {
       template_name: 'ghazala_enrollment_confirm',
       category: 'UTILITY',
       variables: JSON.stringify(['Student Name', 'Course Name', 'Batch Timing', 'Mode', 'Start Date']),
-      body: 'Hi {{1}}! 🎊\n\nYou\'re officially enrolled in *{{2}}* at Ghazala Institute!\n\n📅 Timing: {{3}}\n📍 Mode: {{4}}\n🗓️ Starting: {{5}}\n\nWelcome aboard! 💪\n\n📞 03142230194 | 03334429257\n📧 info@ghazalainstitute.com'
+      body: 'Hi {{1}}! 🎊\n\nYou\'re officially enrolled in *{{2}}* at Ghazala Institute!\n\n📅 Timing: {{3}}\n📍 Mode: {{4}}\n🗓️ Starting: {{5}}\n\nWelcome aboard! 💪\n\n📞 03142230194 | 03334429257'
     }
   ];
-
   for (const t of templates) {
-    await conn.execute(`
-      INSERT IGNORE INTO templates (name, template_name, category, variables, body)
-      VALUES (?, ?, ?, ?, ?)
-    `, [t.name, t.template_name, t.category, t.variables, t.body]);
+    await conn.execute('INSERT IGNORE INTO templates (name, template_name, category, variables, body) VALUES (?,?,?,?,?)',
+      [t.name, t.template_name, t.category, t.variables, t.body]);
   }
 }
 
@@ -278,7 +273,7 @@ async function insertDefaultBotFlows(conn) {
     },
     {
       trigger_key: 'course_german',
-      message: '🇩🇪 *German Language*\n\n⏱️ Duration: 3 months per level\n\n💰 *Fee Structure:*\n• A1 Lower Beginner (Onsite): PKR 38,000\n• A1 Lower Beginner (Online): PKR 35,000\n• A1 Intensive (Onsite): PKR 45,000\n• A2 Upper Beginner (Onsite/Online): PKR 42,000\n• B1 Intermediate (Onsite/Online): PKR 45,000\n• B2.1 Upper Inter. (Onsite/Online): PKR 50,000\n• B2.2 Upper Inter. (Onsite/Online): PKR 50,000\n\n📦 *Includes:* Books, Course material, Registration\n✅ No hidden charges\n\n📋 Registration Fee: Rs. 2,000 (Non-refundable)\n\nWhat would you like?',
+      message: '🇩🇪 *German Language*\n\n⏱️ Duration: 3 months per level\n\n💰 *Fee Structure:*\n• A1 Lower Beginner (Onsite): PKR 38,000\n• A1 Lower Beginner (Online): PKR 35,000\n• A1 Intensive (Onsite): PKR 45,000\n• A2 Upper Beginner: PKR 42,000\n• B1 Intermediate: PKR 45,000\n• B2.1 Upper Inter.: PKR 50,000\n• B2.2 Upper Inter.: PKR 50,000\n\n📦 *Includes:* Books, Material, Registration\n✅ No hidden charges\n\n📋 Registration Fee: Rs. 2,000 (Non-refundable)',
       buttons: JSON.stringify([
         { id: 'schedule_german', title: '📅 View Schedule' },
         { id: 'register_now', title: '📋 Register Now' },
@@ -288,7 +283,7 @@ async function insertDefaultBotFlows(conn) {
     },
     {
       trigger_key: 'schedule_german',
-      message: '📅 *German A1 Schedule*\n🗓️ Starting: Monday, 08-June-2026\n\n🏫 *ONSITE WEEKDAY:*\n• Mon, Wed, Fri | 11:00am-01:00pm | Miss Fizza\n• Tue, Thu, Fri | 05:00pm-07:00pm | Sir Hateem\n• Mon, Wed, Sat | 07:00pm-09:00pm | Miss Waniya\n• Tue, Thu, Sun | 07:00pm-09:00pm | Miss Waniya\n\n💪 *INTENSIVE:*\n• Mon-Thu | 05:00pm-07:00pm | Miss Waniya\n\n💻 *ONLINE WEEKDAY:*\n• Mon-Thu | 05:00pm-06:00pm\n• Mon-Thu | 10:00pm-11:00pm | Sir Mustafa\n• Mon-Thu | 11:00pm-12:00am | Sir Abdullah\n\n🏫 *ONSITE WEEKEND:*\n• Sat & Sun | 01:00pm-03:00pm | Sir Mustafa\n• Sat & Sun | 03:00pm-05:00pm | Miss Wania\n\n💻 *ONLINE WEEKEND:*\n• Sat & Sun | 04:00pm-06:00pm | Miss Fizza\n• Sat & Sun | 07:00pm-09:00pm | Sir Mustafa\n\nReady to join?',
+      message: '📅 *German A1 Schedule*\n🗓️ Starting: Monday, 08-June-2026\n\n🏫 *ONSITE WEEKDAY:*\n• Mon, Wed, Fri | 11:00am-01:00pm | Miss Fizza\n• Tue, Thu, Fri | 05:00pm-07:00pm | Sir Hateem\n• Mon, Wed, Sat | 07:00pm-09:00pm | Miss Waniya\n\n💪 *INTENSIVE:*\n• Mon-Thu | 05:00pm-07:00pm | Miss Waniya\n\n💻 *ONLINE:*\n• Mon-Thu | 05:00pm-06:00pm\n• Mon-Thu | 10:00pm-11:00pm | Sir Mustafa\n\n🏫 *ONSITE WEEKEND:*\n• Sat & Sun | 01:00pm-03:00pm | Sir Mustafa\n• Sat & Sun | 03:00pm-05:00pm | Miss Wania',
       buttons: JSON.stringify([
         { id: 'register_now', title: '📋 Register Now' },
         { id: 'courses_fees', title: '📚 Other Courses' },
@@ -298,7 +293,7 @@ async function insertDefaultBotFlows(conn) {
     },
     {
       trigger_key: 'course_ielts',
-      message: '📝 *IELTS Preparation*\n\n⏱️ Duration: 2 months\n\n💰 *Fee Structure:*\n• Regular (Onsite): PKR 25,000\n• Regular (Online): PKR 22,000\n• Intensive (Onsite): PKR 30,000\n\n📦 *Includes:* Study material, Mock tests, Books\n✅ No hidden charges\n\n📋 Registration Fee: Rs. 2,000 (Non-refundable)\n\nWhat would you like?',
+      message: '📝 *IELTS Preparation*\n\n⏱️ Duration: 2 months\n\n💰 *Fee Structure:*\n• Regular (Onsite): PKR 25,000\n• Regular (Online): PKR 22,000\n• Intensive (Onsite): PKR 30,000\n\n📦 *Includes:* Study material, Mock tests, Books\n✅ No hidden charges\n\n📋 Registration Fee: Rs. 2,000',
       buttons: JSON.stringify([
         { id: 'register_now', title: '📋 Register Now' },
         { id: 'courses_fees', title: '📚 Other Courses' },
@@ -308,7 +303,7 @@ async function insertDefaultBotFlows(conn) {
     },
     {
       trigger_key: 'course_pte',
-      message: '💻 *PTE Preparation*\n\n⏱️ Duration: 6 weeks\n\n💰 *Fee Structure:*\n• Regular (Onsite): PKR 20,000\n• Regular (Online): PKR 18,000\n\n📦 *Includes:* Study material, Practice tests\n✅ No hidden charges\n\n📋 Registration Fee: Rs. 2,000 (Non-refundable)\n\nWhat would you like?',
+      message: '💻 *PTE Preparation*\n\n⏱️ Duration: 6 weeks\n\n💰 *Fee Structure:*\n• Regular (Onsite): PKR 20,000\n• Regular (Online): PKR 18,000\n\n📦 *Includes:* Study material, Practice tests\n✅ No hidden charges\n\n📋 Registration Fee: Rs. 2,000',
       buttons: JSON.stringify([
         { id: 'register_now', title: '📋 Register Now' },
         { id: 'courses_fees', title: '📚 Other Courses' },
@@ -318,7 +313,7 @@ async function insertDefaultBotFlows(conn) {
     },
     {
       trigger_key: 'course_spoken',
-      message: '🎤 *Spoken English*\n\n⏱️ Duration: 3 months\n\n💰 *Fee Structure:*\n• Regular (Onsite): PKR 15,000\n• Regular (Online): PKR 12,000\n\n📦 *Includes:* Speaking sessions, Materials\n✅ No hidden charges\n\n📋 Registration Fee: Rs. 2,000 (Non-refundable)\n\nWhat would you like?',
+      message: '🎤 *Spoken English*\n\n⏱️ Duration: 3 months\n\n💰 *Fee Structure:*\n• Regular (Onsite): PKR 15,000\n• Regular (Online): PKR 12,000\n\n📦 *Includes:* Speaking sessions, Materials\n✅ No hidden charges\n\n📋 Registration Fee: Rs. 2,000',
       buttons: JSON.stringify([
         { id: 'register_now', title: '📋 Register Now' },
         { id: 'courses_fees', title: '📚 Other Courses' },
@@ -348,7 +343,7 @@ async function insertDefaultBotFlows(conn) {
     },
     {
       trigger_key: 'admission_info',
-      message: '🎓 *Admission Information*\n\n📋 *Requirements:*\n• Valid CNIC/B-Form copy\n• Recent passport size photo\n• Registration fee Rs. 2,000\n\n📝 *Process:*\n1. Select your course\n2. Choose batch timing\n3. Pay registration fee\n4. Confirmation sent\n\n🎯 *Levels Available:*\n• Beginner to Advanced\n• Onsite & Online both available\n\nReady to join?',
+      message: '🎓 *Admission Information*\n\n📋 *Requirements:*\n• Valid CNIC/B-Form copy\n• Recent passport size photo\n• Registration fee Rs. 2,000\n\n📝 *Process:*\n1. Select your course\n2. Choose batch timing\n3. Pay registration fee\n4. Confirmation sent\n\n🎯 *Levels Available:*\n• Beginner to Advanced\n• Onsite & Online both available',
       buttons: JSON.stringify([
         { id: 'register_now', title: '📋 Register Now' },
         { id: 'courses_fees', title: '📚 View Courses' },
@@ -358,7 +353,7 @@ async function insertDefaultBotFlows(conn) {
     },
     {
       trigger_key: 'talk_to_agent',
-      message: '🤝 *Connecting you to an agent...*\n\nAn agent will respond shortly. Office hours: Mon-Sat 9am-9pm\n\n📞 Or call directly:\n• 03142230194\n• 03334429257',
+      message: '🤝 *Connecting you to an agent...*\n\nAn agent will respond shortly.\nOffice hours: Mon-Sat 9am-9pm\n\n📞 Or call directly:\n• 03142230194\n• 03334429257',
       buttons: JSON.stringify([]),
       action: 'agent_handover'
     },
@@ -384,15 +379,10 @@ async function insertDefaultBotFlows(conn) {
   ];
 
   for (const flow of flows) {
-    await conn.execute(`
-      INSERT IGNORE INTO bot_flows (trigger_key, message, buttons, action)
-      VALUES (?, ?, ?, ?)
-    `, [flow.trigger_key, flow.message, flow.buttons, flow.action]);
+    await conn.execute('INSERT IGNORE INTO bot_flows (trigger_key, message, buttons, action) VALUES (?,?,?,?)',
+      [flow.trigger_key, flow.message, flow.buttons, flow.action]);
   }
 }
 
-function getPool() {
-  return pool;
-}
-
+function getPool() { return pool; }
 module.exports = { initDB, getPool };
