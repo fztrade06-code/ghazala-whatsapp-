@@ -147,7 +147,7 @@ async function sendTemplate(phone, templateName, variables) {
 
 async function getBotFlow(triggerKey) {
   const pool = getPool();
-  if (!pool) return getDefaultFlow(triggerKey);
+if (!pool) return null;
   try {
     const [rows] = await pool.execute(
       'SELECT * FROM bot_flows WHERE trigger_key = ? AND is_active = 1', [triggerKey]
