@@ -42,6 +42,7 @@ async function createTables() {
         segment VARCHAR(100) DEFAULT 'General',
         status ENUM('active','opted_out','blocked') DEFAULT 'active',
         last_message DATETIME,
+        last_read_at DATETIME DEFAULT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -76,11 +77,6 @@ async function createTables() {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
-
-    // Add last_flow column if upgrading
-    try {
-      await conn.execute('ALTER TABLE bot_sessions ADD COLUMN last_flow VARCHAR(100) DEFAULT NULL');
-    } catch (e) { /* already exists */ }
 
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS leads (
@@ -168,18 +164,31 @@ async function createTables() {
         social_links JSON,
         business_hours JSON,
         two_fa_enabled TINYINT DEFAULT 0,
+        two_fa_method VARCHAR(20) DEFAULT NULL,
+        totp_secret VARCHAR(255) DEFAULT NULL,
         is_active TINYINT DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    // Add new columns if upgrading existing users table
-    const newCols = ['email VARCHAR(255)', 'whatsapp VARCHAR(20)', 'about TEXT', 'address TEXT', 'profile_pic TEXT', 'social_links JSON', 'business_hours JSON', 'two_fa_enabled TINYINT DEFAULT 0'];
-    for (const col of newCols) {
-      try { await conn.execute(`ALTER TABLE users ADD COLUMN ${col}`); } catch (e) { /* already exists */ }
+    // Upgrade existing tables — safe ALTER TABLE with specific error check
+    const upgradeColumns = [
+      ['users', 'email VARCHAR(255)'],
+      ['users', 'whatsapp VARCHAR(20)'],
+      ['users', 'about TEXT'],
+      ['users', 'address TEXT'],
+      ['users', 'profile_pic TEXT'],
+      ['users', 'social_links JSON'],
+      ['users', 'business_hours JSON'],
+      ['users', 'two_fa_enabled TINYINT DEFAULT 0'],
+      ['users', 'two_fa_method VARCHAR(20) DEFAULT NULL'],
+      ['users', 'totp_secret VARCHAR(255) DEFAULT NULL'],
+      ['contacts', 'last_read_at DATETIME DEFAULT NULL'],
+    ];
+    for (const [tbl, col] of upgradeColumns) {
+      try { await conn.execute(`ALTER TABLE ${tbl} ADD COLUMN ${col}`); } catch (e) { /* column already exists */ }
     }
 
-    // Default admin
     const bcrypt = require('bcryptjs');
     const adminPass = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'ghazala123', 10);
     await conn.execute(`
