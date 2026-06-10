@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/index.html << 'HTMLEOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -322,20 +321,20 @@ select.inp option{background:var(--surface2);}
 
     <!-- Step 1: Username/Password -->
     <div id="loginStep1">
-      <input type="text" id="loginUser" placeholder="Username" autocomplete="username">
-      <input type="password" id="loginPass" placeholder="Password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+      <input type="text" id="loginUser" placeholder="Username" autocomplete="off">
+      <input type="password" id="loginPass" placeholder="Password" autocomplete="new-password" onkeydown="if(event.key==='Enter')doLogin()">
       <button class="login-btn" id="loginBtn" onclick="doLogin()">
         <span id="loginBtnText">Login →</span>
       </button>
       <span class="login-link" onclick="showForgotPassword()">Forgot password?</span>
     </div>
 
-    <!-- Step 2: OTP -->
+    <!-- Step 2: OTP / TOTP -->
     <div id="loginStep2" style="display:none;">
-      <div class="otp-info">🔐 OTP sent to your registered WhatsApp / Email.<br>Enter the 6-digit code below.</div>
-      <input type="text" id="otpInput" placeholder="Enter 6-digit OTP" maxlength="6" style="letter-spacing:8px;font-size:20px;text-align:center;" onkeydown="if(event.key==='Enter')verifyOTP()">
+      <div class="otp-info" id="otpInfo">🔐 OTP sent to your registered WhatsApp / Email.<br>Enter the 6-digit code below.</div>
+      <input type="text" id="otpInput" placeholder="Enter 6-digit code" maxlength="6" style="letter-spacing:8px;font-size:20px;text-align:center;" autocomplete="off" onkeydown="if(event.key==='Enter')verifyOTP()">
       <button class="login-btn" id="otpBtn" onclick="verifyOTP()">
-        <span>Verify OTP →</span>
+        <span>Verify →</span>
       </button>
       <span class="login-link" onclick="showStep1()">← Back to Login</span>
     </div>
@@ -691,20 +690,51 @@ select.inp option{background:var(--surface2);}
         <div class="setting-section">
           <h3>🔐 Two-Factor Authentication (2FA)</h3>
           <div id="twoFAStatus" style="margin-bottom:14px;"></div>
+
+          <!-- Enable 2FA panel -->
           <div id="twoFASetup" style="display:none;">
             <div class="form-row">
-              <label>Send OTP via</label>
-              <select class="inp" id="otpSendType">
-                <option value="whatsapp">WhatsApp</option>
-                <option value="email">Email</option>
+              <label>Choose 2FA method</label>
+              <select class="inp" id="twoFAMethod" onchange="onTwoFAMethodChange()">
+                <option value="whatsapp">📱 WhatsApp OTP</option>
+                <option value="email">📧 Email OTP</option>
+                <option value="totp">🔑 Google Authenticator (TOTP)</option>
               </select>
             </div>
-            <button class="btn btn-ghost btn-sm" onclick="sendSetup2FAOTP()" style="margin-bottom:12px;">📨 Send OTP</button>
-            <div id="otpVerifySection" style="display:none;">
-              <div class="form-row"><label>Enter OTP</label><input class="inp" id="setup2faOtp" placeholder="6-digit OTP" maxlength="6" style="letter-spacing:6px;text-align:center;"></div>
-              <button class="btn btn-primary" onclick="enable2FA()">✅ Enable 2FA</button>
+
+            <!-- OTP flow (WhatsApp / Email) -->
+            <div id="twoFAOtpFlow">
+              <button class="btn btn-ghost btn-sm" onclick="sendSetup2FAOTP()" style="margin-bottom:12px;">📨 Send OTP</button>
+              <div id="otpVerifySection" style="display:none;">
+                <div class="form-row"><label>Enter OTP</label><input class="inp" id="setup2faOtp" placeholder="6-digit OTP" maxlength="6" style="letter-spacing:6px;text-align:center;" autocomplete="off"></div>
+                <button class="btn btn-primary" onclick="enable2FA('otp')">✅ Enable 2FA</button>
+              </div>
+            </div>
+
+            <!-- TOTP flow (Google Authenticator) -->
+            <div id="twoFATotpFlow" style="display:none;">
+              <div id="totpSetupContent">
+                <button class="btn btn-ghost btn-sm" onclick="setupTOTP()" id="totpSetupBtn">📲 Generate QR Code</button>
+              </div>
+              <div id="totpQRSection" style="display:none;">
+                <div style="display:flex;gap:16px;align-items:flex-start;margin:12px 0;">
+                  <img id="totpQRImage" style="width:150px;height:150px;border-radius:8px;border:1px solid var(--border);background:#fff;" alt="QR Code">
+                  <div style="flex:1;">
+                    <div style="font-size:12px;color:var(--text2);line-height:1.7;margin-bottom:8px;">
+                      1. Open <b>Google Authenticator</b> or <b>Authy</b><br>
+                      2. Tap <b>+</b> → Scan QR code<br>
+                      3. Enter the 6-digit code below
+                    </div>
+                    <div id="totpManualKey" style="font-size:10px;color:var(--muted);word-break:break-all;background:var(--surface2);padding:6px 8px;border-radius:6px;"></div>
+                  </div>
+                </div>
+                <div class="form-row"><label>Enter code from Authenticator app</label><input class="inp" id="totpVerifyCode" placeholder="6-digit code" maxlength="6" style="letter-spacing:6px;text-align:center;" autocomplete="off"></div>
+                <button class="btn btn-primary" onclick="enable2FA('totp')">✅ Enable Google Authenticator</button>
+              </div>
             </div>
           </div>
+
+          <!-- Disable 2FA -->
           <div id="twoFADisable" style="display:none;">
             <button class="btn btn-danger" onclick="disable2FA()">❌ Disable 2FA</button>
           </div>
@@ -761,6 +791,8 @@ function showForgotPassword() {
   document.getElementById('loginError').textContent = '';
 }
 
+let loginOTPMethod = 'otp'; // 'otp' or 'totp'
+
 async function doLogin() {
   const u = document.getElementById('loginUser').value.trim();
   const p = document.getElementById('loginPass').value.trim();
@@ -773,9 +805,16 @@ async function doLogin() {
     });
     const data = await res.json();
     if (data.requireOTP) {
+      loginOTPMethod = data.method || 'otp';
+      const info = document.getElementById('otpInfo');
+      if (loginOTPMethod === 'totp') {
+        info.innerHTML = '🔐 Open your <b>Google Authenticator</b> app and enter the 6-digit code.';
+      } else {
+        info.innerHTML = '🔐 OTP sent to your registered WhatsApp / Email.<br>Enter the 6-digit code below.';
+      }
       document.getElementById('loginStep1').style.display = 'none';
       document.getElementById('loginStep2').style.display = 'block';
-      document.getElementById('loginSubtitle').textContent = '2FA Verification';
+      document.getElementById('loginSubtitle').textContent = loginOTPMethod === 'totp' ? 'Authenticator App' : '2FA Verification';
       document.getElementById('otpInput').value = '';
       document.getElementById('otpInput').focus();
       setLoginError('');
@@ -791,16 +830,16 @@ async function doLogin() {
 async function verifyOTP() {
   const u = document.getElementById('loginUser').value.trim();
   const otp = document.getElementById('otpInput').value.trim();
-  if (!otp) { setLoginError('Enter OTP'); return; }
+  if (!otp) { setLoginError('Enter the code'); return; }
   setLoginLoading(true);
   try {
     const res = await fetch(`${API}/api/verify-otp`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: u, otp })
+      body: JSON.stringify({ username: u, otp, method: loginOTPMethod })
     });
     const data = await res.json();
     if (data.token) { finishLogin(data); }
-    else { setLoginError(data.error || 'Invalid OTP'); }
+    else { setLoginError(data.error || 'Invalid code'); }
   } catch { setLoginError('Server error'); }
   setLoginLoading(false);
 }
@@ -1310,8 +1349,8 @@ function filterChats() {
 async function openChat(phone) {
   currentChat = phone;
   const contact = allChats.find(c => c.phone === phone) || { phone, name: phone };
-
-  // Highlight active
+  // Mark messages as read
+  apiFetch(`/api/chats/${phone}/read`, { method: 'POST' });
   document.querySelectorAll('.chat-item').forEach(i => {
     i.classList.toggle('active', i.onclick?.toString().includes(`'${phone}'`));
   });
@@ -1485,13 +1524,25 @@ async function updateLead(id, status) {
 }
 
 function exportLeads() {
-  apiFetch('/api/leads').then(leads => {
+  const search = document.getElementById('leadSearch')?.value || '';
+  const course = document.getElementById('leadCourse')?.value || '';
+  const mode = document.getElementById('leadMode')?.value || '';
+  const status = document.getElementById('leadStatus')?.value || '';
+  const from = document.getElementById('leadFrom')?.value || '';
+  const to = document.getElementById('leadTo')?.value || '';
+  let url = `/api/leads?search=${encodeURIComponent(search)}`;
+  if (course) url += `&course=${encodeURIComponent(course)}`;
+  if (mode) url += `&mode=${encodeURIComponent(mode)}`;
+  if (status) url += `&status=${encodeURIComponent(status)}`;
+  if (from) url += `&from=${from}`;
+  if (to) url += `&to=${to}`;
+  apiFetch(url).then(leads => {
     if (!leads?.length) return showToast('No leads to export', 'error');
-    const csv = ['Name,Phone,Course,Level,Mode,Status,Date']
+    const csvContent = ['Name,Phone,Course,Level,Mode,Status,Date']
       .concat(leads.map(l => `"${l.name||''}","${l.phone||''}","${l.course||''}","${l.level||''}","${l.mode||''}","${l.status||''}","${l.created_at||''}"`))
       .join('\n');
     const a = document.createElement('a');
-    a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+    a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csvContent);
     a.download = 'ghazala_leads.csv'; a.click();
   });
 }
@@ -1692,28 +1743,43 @@ function editFlow(id) {
     if (!f) return;
     const btns = f.buttons || [];
     openModal(`✏️ Edit Flow: ${f.trigger_key}`, `
-      <div class="form-row">
-        <label>Message</label>
-        <textarea class="inp" id="m_fmsg" style="min-height:120px;">${escapeHtml(f.message||'')}</textarea>
-      </div>
-      <div class="form-row">
-        <label>Buttons <span style="color:var(--muted);font-size:11px;">(add up to 10)</span></label>
-        <div class="btn-builder" id="btnBuilder">
-          ${btns.map((b,i) => `
-            <div class="btn-builder-item">
-              <input class="inp" placeholder="Button ID (e.g. course_german)" value="${escapeHtml(b.id||'')}" id="btn_id_${i}">
-              <input class="inp" placeholder="Button Title" value="${escapeHtml(b.title||'')}" id="btn_title_${i}">
-              <button class="btn-rm" onclick="removeBtnRow(${i})">✕</button>
-            </div>`).join('')}
+      <div style="display:grid;grid-template-columns:1fr 220px;gap:16px;align-items:start;">
+        <div>
+          <div class="form-row">
+            <label>Message</label>
+            <textarea class="inp" id="m_fmsg" style="min-height:120px;" oninput="updateFlowPreview()">${escapeHtml(f.message||'')}</textarea>
+          </div>
+          <div class="form-row">
+            <label>Buttons <span style="color:var(--muted);font-size:11px;">(max 10)</span></label>
+            <div class="btn-builder" id="btnBuilder">
+              ${btns.map((b,i) => `
+                <div class="btn-builder-item">
+                  <input class="inp" placeholder="Button ID" value="${escapeHtml(b.id||'')}" oninput="updateFlowPreview()" style="flex:1;">
+                  <input class="inp" placeholder="Button Title" value="${escapeHtml(b.title||'')}" oninput="updateFlowPreview()" style="flex:1;">
+                  <button class="btn-rm" onclick="removeBtnRow(${i})">✕</button>
+                </div>`).join('')}
+            </div>
+            <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="addBtnRow()">+ Add Button</button>
+          </div>
+          <div class="form-row">
+            <label>Active</label>
+            <select class="inp" id="m_factive">
+              <option value="1" ${f.is_active?'selected':''}>Yes</option>
+              <option value="0" ${!f.is_active?'selected':''}>No</option>
+            </select>
+          </div>
         </div>
-        <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="addBtnRow()">+ Add Button</button>
-      </div>
-      <div class="form-row">
-        <label>Active</label>
-        <select class="inp" id="m_factive">
-          <option value="1" ${f.is_active?'selected':''}>Yes</option>
-          <option value="0" ${!f.is_active?'selected':''}>No</option>
-        </select>
+        <div>
+          <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px;">Preview</label>
+          <div class="phone-mock">
+            <div class="phone-hdr"><div class="phone-av">🌿</div><div><div class="phone-name">Ghazala Institute</div><div class="phone-online">● Online</div></div></div>
+            <div class="phone-body" id="flowPreviewBody">
+              <div class="phone-msg" id="flowPreviewMsg">${escapeHtml(f.message||'').replace(/\n/g,'<br>').replace(/\*(.+?)\*/g,'<b>$1</b>')}</div>
+              <div id="flowPreviewBtns" style="margin-top:6px;">${btns.slice(0,3).map(b=>`<div style="background:var(--surface3);border-radius:8px;padding:7px 10px;font-size:11px;text-align:center;margin-bottom:4px;border:1px solid var(--border2);">${escapeHtml(b.title)}</div>`).join('')}</div>
+              <div class="phone-tick">✓✓ Just now</div>
+            </div>
+          </div>
+        </div>
       </div>
     `, async () => {
       const buttons = collectButtons();
@@ -1725,54 +1791,85 @@ function editFlow(id) {
       if (r?.success) { closeModal(); loadBotFlows(); showToast('Flow updated — live now!'); }
       else showToast(r?.error||'Failed', 'error');
     });
+    // Resize modal wider for preview
+    const mb = document.getElementById('modalBox');
+    if (mb) mb.style.width = '820px';
   });
 }
 
 function collectButtons() {
   const rows = document.querySelectorAll('.btn-builder-item');
   const btns = [];
-  rows.forEach((row, i) => {
-    const id = document.getElementById(`btn_id_${i}`)?.value?.trim();
-    const title = document.getElementById(`btn_title_${i}`)?.value?.trim();
+  rows.forEach(row => {
+    const inputs = row.querySelectorAll('input');
+    const id = inputs[0]?.value?.trim();
+    const title = inputs[1]?.value?.trim();
     if (id && title) btns.push({ id, title });
   });
   return btns;
 }
 
-let btnRowCount = 0;
 function addBtnRow() {
-  btnRowCount++;
-  const i = document.querySelectorAll('.btn-builder-item').length;
   const builder = document.getElementById('btnBuilder');
   if (!builder) return;
   const div = document.createElement('div');
   div.className = 'btn-builder-item';
   div.innerHTML = `
-    <input class="inp" placeholder="Button ID" id="btn_id_${i}">
-    <input class="inp" placeholder="Button Title" id="btn_title_${i}">
-    <button class="btn-rm" onclick="this.parentElement.remove()">✕</button>`;
+    <input class="inp" placeholder="Button ID (e.g. my_flow)" style="flex:1;">
+    <input class="inp" placeholder="Button Title" style="flex:1;">
+    <button class="btn-rm" onclick="this.parentElement.remove();updateFlowPreview()">✕</button>`;
   builder.appendChild(div);
+  div.querySelectorAll('input').forEach(inp => inp.addEventListener('input', updateFlowPreview));
 }
 
 function removeBtnRow(i) {
   const rows = document.querySelectorAll('.btn-builder-item');
   if (rows[i]) rows[i].remove();
+  updateFlowPreview();
+}
+
+function updateFlowPreview() {
+  const msg = document.getElementById('m_fmsg')?.value || '';
+  const previewMsg = document.getElementById('flowPreviewMsg');
+  const previewBtns = document.getElementById('flowPreviewBtns');
+  if (previewMsg) previewMsg.innerHTML = escapeHtml(msg).replace(/\n/g,'<br>').replace(/\*(.+?)\*/g,'<b>$1</b>');
+  if (previewBtns) {
+    const btns = collectButtons();
+    previewBtns.innerHTML = btns.slice(0,3).map(b =>
+      `<div style="background:var(--surface3);border-radius:8px;padding:7px 10px;font-size:11px;text-align:center;margin-bottom:4px;border:1px solid var(--border2);">${escapeHtml(b.title)}</div>`
+    ).join('') + (btns.length > 3 ? `<div style="font-size:10px;color:var(--muted);text-align:center;">+${btns.length-3} more shown as list</div>` : '');
+  }
 }
 
 function openNewFlow() {
   openModal('➕ New Bot Flow', `
-    <div class="form-row"><label>Trigger Key (unique, no spaces)</label><input class="inp" id="m_ftrigger" placeholder="e.g. my_new_flow"></div>
-    <div class="form-row"><label>Message</label><textarea class="inp" id="m_fmsg" style="min-height:100px;" placeholder="Message text..."></textarea></div>
-    <div class="form-row">
-      <label>Buttons</label>
-      <div class="btn-builder" id="btnBuilder">
-        <div class="btn-builder-item">
-          <input class="inp" placeholder="Button ID" id="btn_id_0">
-          <input class="inp" placeholder="Button Title" id="btn_title_0">
-          <button class="btn-rm" onclick="this.parentElement.remove()">✕</button>
+    <div style="display:grid;grid-template-columns:1fr 220px;gap:16px;align-items:start;">
+      <div>
+        <div class="form-row"><label>Trigger Key (unique, no spaces)</label><input class="inp" id="m_ftrigger" placeholder="e.g. my_new_flow"></div>
+        <div class="form-row"><label>Message</label><textarea class="inp" id="m_fmsg" style="min-height:100px;" placeholder="Message text..." oninput="updateFlowPreview()"></textarea></div>
+        <div class="form-row">
+          <label>Buttons</label>
+          <div class="btn-builder" id="btnBuilder">
+            <div class="btn-builder-item">
+              <input class="inp" placeholder="Button ID" style="flex:1;" oninput="updateFlowPreview()">
+              <input class="inp" placeholder="Button Title" style="flex:1;" oninput="updateFlowPreview()">
+              <button class="btn-rm" onclick="this.parentElement.remove();updateFlowPreview()">✕</button>
+            </div>
+          </div>
+          <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="addBtnRow()">+ Add Button</button>
         </div>
       </div>
-      <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="addBtnRow()">+ Add Button</button>
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px;">Preview</label>
+        <div class="phone-mock">
+          <div class="phone-hdr"><div class="phone-av">🌿</div><div><div class="phone-name">Ghazala Institute</div><div class="phone-online">● Online</div></div></div>
+          <div class="phone-body">
+            <div class="phone-msg" id="flowPreviewMsg">Type a message to preview...</div>
+            <div id="flowPreviewBtns" style="margin-top:6px;"></div>
+            <div class="phone-tick">✓✓ Just now</div>
+          </div>
+        </div>
+      </div>
     </div>
   `, async () => {
     const trigger = document.getElementById('m_ftrigger').value.trim().replace(/\s+/g,'_');
@@ -1786,6 +1883,8 @@ function openNewFlow() {
     if (r?.success) { closeModal(); loadBotFlows(); showToast('Flow created!'); }
     else showToast(r?.error||'Failed', 'error');
   });
+  const mb = document.getElementById('modalBox');
+  if (mb) mb.style.width = '820px';
 }
 
 async function deleteFlow(id) {
@@ -1959,8 +2058,16 @@ async function changePassword() {
   } else showToast(r?.error||'Failed', 'error');
 }
 
+function onTwoFAMethodChange() {
+  const method = document.getElementById('twoFAMethod').value;
+  document.getElementById('twoFAOtpFlow').style.display = (method === 'whatsapp' || method === 'email') ? 'block' : 'none';
+  document.getElementById('twoFATotpFlow').style.display = method === 'totp' ? 'block' : 'none';
+  document.getElementById('otpVerifySection').style.display = 'none';
+  document.getElementById('totpQRSection').style.display = 'none';
+}
+
 async function sendSetup2FAOTP() {
-  const type = document.getElementById('otpSendType').value;
+  const type = document.getElementById('twoFAMethod').value;
   const r = await apiFetch('/api/send-otp', { method:'POST', body:JSON.stringify({type}) });
   if (r?.success) {
     document.getElementById('otpVerifySection').style.display = 'block';
@@ -1968,16 +2075,37 @@ async function sendSetup2FAOTP() {
   } else showToast(r?.error||'Failed — check your email/WhatsApp in profile', 'error');
 }
 
-async function enable2FA() {
-  const otp = document.getElementById('setup2faOtp').value.trim();
-  if (!otp) return showToast('Enter OTP', 'error');
-  const r = await apiFetch('/api/profile/2fa', { method:'PUT', body:JSON.stringify({enabled:true, otp}) });
-  if (r?.success) { showToast('✅ 2FA Enabled!'); loadProfile(); }
-  else showToast(r?.error||'Invalid OTP', 'error');
+async function setupTOTP() {
+  const btn = document.getElementById('totpSetupBtn');
+  btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Generating...';
+  const r = await apiFetch('/api/setup-totp', { method: 'POST' });
+  btn.disabled = false; btn.innerHTML = '📲 Generate QR Code';
+  if (r?.success) {
+    document.getElementById('totpQRImage').src = r.qrCode;
+    document.getElementById('totpManualKey').textContent = 'Manual key: ' + r.secret;
+    document.getElementById('totpQRSection').style.display = 'block';
+    showToast('QR code generated — scan with your app');
+  } else showToast(r?.error||'Failed', 'error');
+}
+
+async function enable2FA(method) {
+  let otp = '';
+  if (method === 'otp') {
+    otp = document.getElementById('setup2faOtp')?.value?.trim();
+    if (!otp) return showToast('Enter OTP', 'error');
+  } else if (method === 'totp') {
+    otp = document.getElementById('totpVerifyCode')?.value?.trim();
+    if (!otp) return showToast('Enter the code from your authenticator app', 'error');
+  }
+  const r = await apiFetch('/api/profile/2fa', { method:'PUT', body:JSON.stringify({enabled:true, otp, method}) });
+  if (r?.success) {
+    showToast('✅ 2FA Enabled!');
+    loadProfile();
+  } else showToast(r?.error||'Invalid code', 'error');
 }
 
 async function disable2FA() {
-  if (!confirm('Disable 2FA?')) return;
+  if (!confirm('Disable 2FA? Your account will be less secure.')) return;
   const r = await apiFetch('/api/profile/2fa', { method:'PUT', body:JSON.stringify({enabled:false, otp:''}) });
   if (r?.success) { showToast('2FA Disabled'); loadProfile(); }
   else showToast(r?.error||'Failed', 'error');
