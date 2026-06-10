@@ -11,6 +11,9 @@ const path = require('path');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const nodemailer = require('nodemailer');
+const rateLimit = require('express-rate-limit');
+const speakeasy = require('speakeasy');
+const QRCode = require('qrcode');
 require('dotenv').config();
 
 const { initDB, getPool } = require('./database');
@@ -20,7 +23,15 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// ── Startup warnings ────────────────────────────────────────
+['WHATSAPP_TOKEN', 'PHONE_NUMBER_ID', 'JWT_SECRET', 'ADMIN_PASSWORD'].forEach(v => {
+  if (!process.env[v]) console.warn(`⚠️  Missing env var: ${v} — using insecure default`);
+});
+
+// ── CORS ────────────────────────────────────────────────────
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
+app.use(cors({ origin: ALLOWED_ORIGIN }));
+
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -30,12 +41,22 @@ const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 }
 const WA_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'ghazala2024';
-const WA_API = `https://graph.facebook.com/v18.0/${PHONE_ID}/messages`;
-const JWT_SECRET = process.env.JWT_SECRET || 'ghazala_secret';
+const WA_API = PHONE_ID ? `https://graph.facebook.com/v18.0/${PHONE_ID}/messages` : null;
+const JWT_SECRET = process.env.JWT_SECRET || 'ghazala_secret_change_me';
 const ADMIN_PHONE = process.env.ADMIN_WHATSAPP || '';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || '';
 
-// ==================== WEBSOCKET ====================
+// ── Rate limiters ───────────────────────────────────────────
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Too many attempts. Try again in 15 minutes.' }
+});
+const otpLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Too many OTP attempts. Wait 5 minutes.' }
+});
+
+// ── WebSocket ───────────────────────────────────────────────
 const clients = new Set();
 wss.on('connection', (ws) => {
   clients.add(ws);
@@ -46,25 +67,23 @@ wss.on('connection', (ws) => {
 function broadcast(data) {
   const msg = JSON.stringify(data);
   clients.forEach(ws => {
-    try { if (ws.readyState === 1) ws.send(msg); } catch (e) { }
+    try { if (ws.readyState === 1) ws.send(msg); } catch (e) {}
   });
 }
 
-// ==================== OTP STORE ====================
-const otpStore = new Map(); // key: username, value: { otp, expires, type }
+// ── OTP Store ───────────────────────────────────────────────
+const otpStore = new Map();
 
 function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
 async function sendOTPWhatsApp(phone, otp, purpose = 'login') {
-  if (!phone || !WA_TOKEN) return false;
+  if (!phone || !WA_TOKEN || !WA_API) return false;
   try {
     const msg = `🔐 *Ghazala Institute*\n\nYour ${purpose} OTP is:\n\n*${otp}*\n\n⏰ Valid for 10 minutes.\nDo not share this code.`;
     await axios.post(WA_API, {
-      messaging_product: 'whatsapp',
-      to: phone,
-      type: 'text',
+      messaging_product: 'whatsapp', to: phone, type: 'text',
       text: { body: msg }
     }, { headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
     return true;
@@ -86,7 +105,7 @@ async function sendOTPEmail(email, otp, purpose = 'login') {
     await transporter.sendMail({
       from: `"Ghazala Institute" <${process.env.SMTP_USER}>`,
       to: email,
-      subject: `Your OTP - Ghazala Institute`,
+      subject: `Your OTP — Ghazala Institute`,
       html: `<div style="font-family:sans-serif;padding:20px;background:#f5f5f5;">
         <h2 style="color:#128C7E;">Ghazala Institute</h2>
         <p>Your <b>${purpose}</b> OTP is:</p>
@@ -101,7 +120,7 @@ async function sendOTPEmail(email, otp, purpose = 'login') {
   }
 }
 
-// ==================== AUTH MIDDLEWARE ====================
+// ── Auth middleware ─────────────────────────────────────────
 function authMiddleware(req, res, next) {
   const token = req.headers['authorization']?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token' });
@@ -118,8 +137,9 @@ function adminOnly(req, res, next) {
   next();
 }
 
-// ==================== WHATSAPP SEND ====================
+// ── WhatsApp send helpers ───────────────────────────────────
 async function sendTextMessage(phone, text) {
+  if (!WA_API || !WA_TOKEN) return null;
   try {
     const r = await axios.post(WA_API, {
       messaging_product: 'whatsapp', to: phone, type: 'text',
@@ -133,6 +153,7 @@ async function sendTextMessage(phone, text) {
 }
 
 async function sendInteractiveButtons(phone, bodyText, buttons) {
+  if (!WA_API || !WA_TOKEN) return null;
   try {
     if (buttons.length <= 3) {
       const r = await axios.post(WA_API, {
@@ -160,6 +181,7 @@ async function sendInteractiveButtons(phone, bodyText, buttons) {
 }
 
 async function sendTemplate(phone, templateName, variables) {
+  if (!WA_API || !WA_TOKEN) return { success: false, error: 'WhatsApp not configured' };
   try {
     const components = variables?.length > 0 ? [{ type: 'body', parameters: variables.map(v => ({ type: 'text', text: String(v) })) }] : [];
     const r = await axios.post(WA_API, {
@@ -173,6 +195,7 @@ async function sendTemplate(phone, templateName, variables) {
 }
 
 async function sendMediaMessage(phone, mediaType, mediaUrl, caption = '') {
+  if (!WA_API || !WA_TOKEN) return { success: false, error: 'WhatsApp not configured' };
   try {
     const waType = { image: 'image', video: 'video', audio: 'audio', document: 'document' }[mediaType] || 'document';
     const mediaObj = { link: mediaUrl };
@@ -186,7 +209,7 @@ async function sendMediaMessage(phone, mediaType, mediaUrl, caption = '') {
   }
 }
 
-// ==================== BOT ENGINE ====================
+// ── Bot engine ──────────────────────────────────────────────
 async function getBotFlow(triggerKey) {
   const pool = getPool();
   if (!pool) return null;
@@ -262,18 +285,17 @@ async function saveLead(data) {
   } catch (err) { console.error('Save lead error:', err.message); }
 }
 
-// ==================== BOT PROCESS - FIXED CONTEXT ====================
+// ── Bot message processor ───────────────────────────────────
 async function processIncomingMessage(phone, name, msgType, msgContent, msgId, mediaUrl = null) {
   await saveMessage(phone, name, 'inbound', msgContent, msgId, msgType, mediaUrl);
   const session = await getSession(phone);
 
-  // Agent mode — forward to dashboard only
   if (session.agent_mode) {
     broadcast({ type: 'agent_message', phone, content: msgContent, msgType, mediaUrl });
     return;
   }
 
-  // ===== REGISTRATION FLOW =====
+  // Registration flow
   if (session.state === 'reg_waiting_name') {
     if (!msgContent.trim()) return;
     await updateSession(phone, 'reg_waiting_phone', { ...session.data, name: msgContent.trim() }, session.last_flow);
@@ -298,10 +320,8 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId, m
   }
 
   if (session.state === 'reg_waiting_course') {
-    // CONTEXT FIX: only accept valid reg_course_ buttons in this state
     const courseMap = { 'reg_course_german': 'German', 'reg_course_ielts': 'IELTS', 'reg_course_pte': 'PTE', 'reg_course_spoken': 'Spoken English' };
     if (msgType === 'interactive' && !courseMap[msgContent]) {
-      // Wrong button pressed — ignore and re-ask
       const courseButtons = [
         { id: 'reg_course_german', title: '🇩🇪 German' },
         { id: 'reg_course_ielts', title: '📝 IELTS' },
@@ -321,7 +341,6 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId, m
   }
 
   if (session.state === 'reg_waiting_mode') {
-    // CONTEXT FIX: only accept valid reg_mode_ buttons in this state
     const modeMap = { 'reg_mode_onsite': 'Onsite', 'reg_mode_online': 'Online' };
     if (msgType === 'interactive' && !modeMap[msgContent]) {
       const modeButtons = [{ id: 'reg_mode_onsite', title: '🏫 Onsite' }, { id: 'reg_mode_online', title: '💻 Online' }];
@@ -342,12 +361,11 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId, m
     return;
   }
 
-  // ===== BUTTON / TEXT HANDLING WITH CONTEXT =====
+  // Button / text routing
   let buttonId = null;
 
   if (msgType === 'interactive') {
     buttonId = msgContent;
-    // CONTEXT FIX: if user is in a reg state but presses random button, guide them back
     if (session.state && session.state !== 'idle' && session.state.startsWith('reg_')) {
       await updateSession(phone, 'idle', {}, null);
     }
@@ -359,7 +377,6 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId, m
       await handleOptOut(phone, name);
       return;
     } else {
-      // Unknown text — send welcome menu
       buttonId = 'welcome';
     }
   }
@@ -372,7 +389,6 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId, m
     return;
   }
 
-  // Save which flow was last triggered (for context tracking)
   await updateSession(phone, 'idle', session.data || {}, buttonId);
 
   if (flow.action === 'agent_handover') {
@@ -398,14 +414,18 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId, m
   await saveMessage(phone, name, 'outbound', flow.message);
 }
 
+// FIX: clear session on opt-out
 async function handleOptOut(phone, name) {
   const pool = getPool();
-  if (pool) await pool.execute('UPDATE contacts SET status = "opted_out" WHERE phone = ?', [phone]);
+  if (pool) {
+    await pool.execute('UPDATE contacts SET status = "opted_out" WHERE phone = ?', [phone]);
+    await updateSession(phone, 'idle', {}, null); // clear stale state
+  }
   const msg = '✅ You have been unsubscribed. Reply *START* anytime to re-subscribe.';
   await sendTextMessage(phone, msg);
 }
 
-// ==================== WEBHOOK ====================
+// ── Webhook ─────────────────────────────────────────────────
 app.get('/webhook', (req, res) => {
   const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
   if (mode === 'subscribe' && token === VERIFY_TOKEN) return res.status(200).send(challenge);
@@ -443,7 +463,7 @@ app.post('/webhook', async (req, res) => {
                 try {
                   const mr = await axios.get(`https://graph.facebook.com/v18.0/${mediaObj.id}`, { headers: { Authorization: `Bearer ${WA_TOKEN}` } });
                   mediaUrl = mr.data?.url || null;
-                } catch (e) { }
+                } catch (e) {}
               }
             } else {
               content = `[${msg.type} message]`;
@@ -463,19 +483,18 @@ async function updateMessageStatus(waId, status) {
   try {
     await pool.execute('UPDATE messages SET status=? WHERE whatsapp_msg_id=?', [status, waId]);
     broadcast({ type: 'message_status', waId, status });
-  } catch { }
+  } catch {}
 }
 
-// ==================== AUTH ====================
-// Step 1: Login — verify credentials, send OTP
-app.post('/api/login', async (req, res) => {
+// ── AUTH ─────────────────────────────────────────────────────
+app.post('/api/login', authLimiter, async (req, res) => {
   const { username, password } = req.body;
   const pool = getPool();
   try {
     let user = null;
     if (!pool) {
       if (username === (process.env.ADMIN_USERNAME || 'admin') && password === (process.env.ADMIN_PASSWORD || 'ghazala123')) {
-        user = { id: 1, username, role: 'admin', name: 'Admin', email: ADMIN_EMAIL, whatsapp: ADMIN_PHONE, two_fa_enabled: 0 };
+        user = { id: 1, username, role: 'admin', name: 'Admin', email: ADMIN_EMAIL, whatsapp: ADMIN_PHONE, two_fa_enabled: 0, two_fa_method: null };
       }
     } else {
       const [rows] = await pool.execute('SELECT * FROM users WHERE username=? AND is_active=1', [username]);
@@ -485,32 +504,29 @@ app.post('/api/login', async (req, res) => {
     }
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // Check if 2FA enabled for this user
     if (user.two_fa_enabled) {
+      const method = user.two_fa_method || 'otp';
+      if (method === 'totp') {
+        // TOTP — no OTP to send, user opens their authenticator app
+        return res.json({ success: true, requireOTP: true, method: 'totp', message: 'Enter the code from your Authenticator app.' });
+      }
+      // OTP via WhatsApp / Email
       const otp = generateOTP();
       otpStore.set(username, { otp, expires: Date.now() + 10 * 60 * 1000, userId: user.id, purpose: 'login' });
       let sent = false;
       if (user.whatsapp) sent = await sendOTPWhatsApp(user.whatsapp, otp, 'Login');
       if (!sent && user.email) sent = await sendOTPEmail(user.email, otp, 'Login');
-      return res.json({ success: true, requireOTP: true, message: 'OTP sent. Please verify.' });
+      return res.json({ success: true, requireOTP: true, method: 'otp', message: 'OTP sent to your WhatsApp / Email.' });
     }
 
-    // No 2FA — direct login
     const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ success: true, token, user: { username: user.username, role: user.role, name: user.name } });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Step 2: Verify OTP
-app.post('/api/verify-otp', async (req, res) => {
-  const { username, otp } = req.body;
+app.post('/api/verify-otp', otpLimiter, async (req, res) => {
+  const { username, otp, method } = req.body;
   const pool = getPool();
-  const stored = otpStore.get(username);
-  if (!stored) return res.status(400).json({ error: 'OTP not found or expired. Please login again.' });
-  if (Date.now() > stored.expires) { otpStore.delete(username); return res.status(400).json({ error: 'OTP expired. Please login again.' }); }
-  if (stored.otp !== otp) return res.status(400).json({ error: 'Invalid OTP' });
-  otpStore.delete(username);
-
   try {
     let user = null;
     if (!pool) {
@@ -520,13 +536,25 @@ app.post('/api/verify-otp', async (req, res) => {
       user = rows[0];
     }
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (method === 'totp') {
+      if (!user.totp_secret) return res.status(400).json({ error: 'TOTP not configured for this account.' });
+      const verified = speakeasy.totp.verify({ secret: user.totp_secret, encoding: 'base32', token: otp, window: 2 });
+      if (!verified) return res.status(400).json({ error: 'Invalid authenticator code.' });
+    } else {
+      const stored = otpStore.get(username);
+      if (!stored) return res.status(400).json({ error: 'OTP not found or expired. Please login again.' });
+      if (Date.now() > stored.expires) { otpStore.delete(username); return res.status(400).json({ error: 'OTP expired. Please login again.' }); }
+      if (stored.otp !== otp) return res.status(400).json({ error: 'Invalid OTP' });
+      otpStore.delete(username);
+    }
+
     const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ success: true, token, user: { username: user.username, role: user.role, name: user.name } });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Forgot password — send OTP to email/whatsapp
-app.post('/api/forgot-password', async (req, res) => {
+app.post('/api/forgot-password', authLimiter, async (req, res) => {
   const { username } = req.body;
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'Database not available' });
@@ -535,7 +563,7 @@ app.post('/api/forgot-password', async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ error: 'Username not found' });
     const user = rows[0];
     const otp = generateOTP();
-    otpStore.set('reset_' + username, { otp, expires: Date.now() + 10 * 60 * 1000, userId: user.id, purpose: 'reset' });
+    otpStore.set('reset_' + username, { otp, expires: Date.now() + 10 * 60 * 1000, userId: user.id });
     let sent = false;
     if (user.whatsapp) sent = await sendOTPWhatsApp(user.whatsapp, otp, 'Password Reset');
     if (!sent && user.email) sent = await sendOTPEmail(user.email, otp, 'Password Reset');
@@ -544,8 +572,7 @@ app.post('/api/forgot-password', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Reset password with OTP
-app.post('/api/reset-password', async (req, res) => {
+app.post('/api/reset-password', otpLimiter, async (req, res) => {
   const { username, otp, newPassword } = req.body;
   const pool = getPool();
   const stored = otpStore.get('reset_' + username);
@@ -560,9 +587,9 @@ app.post('/api/reset-password', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Send OTP for 2FA setup
-app.post('/api/send-otp', authMiddleware, async (req, res) => {
-  const { type } = req.body; // 'whatsapp' or 'email'
+// Send OTP for 2FA setup (WhatsApp or Email)
+app.post('/api/send-otp', authMiddleware, otpLimiter, async (req, res) => {
+  const { type } = req.body;
   const pool = getPool();
   try {
     const [rows] = await pool.execute('SELECT * FROM users WHERE id=?', [req.user.id]);
@@ -577,12 +604,35 @@ app.post('/api/send-otp', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== PROFILE ====================
+// TOTP Setup — generate secret + QR code
+app.post('/api/setup-totp', authMiddleware, async (req, res) => {
+  try {
+    const pool = getPool();
+    const [rows] = await pool.execute('SELECT username FROM users WHERE id=?', [req.user.id]);
+    const username = rows[0]?.username || req.user.username;
+    const secret = speakeasy.generateSecret({
+      name: `Ghazala CRM (${username})`,
+      issuer: 'Ghazala Institute',
+      length: 20
+    });
+    otpStore.set('totp_setup_' + req.user.username, {
+      secret: secret.base32,
+      expires: Date.now() + 15 * 60 * 1000
+    });
+    const qrCode = await QRCode.toDataURL(secret.otpauth_url);
+    res.json({ success: true, secret: secret.base32, qrCode, otpauthUrl: secret.otpauth_url });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Profile ─────────────────────────────────────────────────
 app.get('/api/profile', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json({});
   try {
-    const [rows] = await pool.execute('SELECT id, username, name, role, email, whatsapp, about, address, profile_pic, social_links, business_hours, two_fa_enabled FROM users WHERE id=?', [req.user.id]);
+    const [rows] = await pool.execute(
+      'SELECT id, username, name, role, email, whatsapp, about, address, profile_pic, social_links, business_hours, two_fa_enabled, two_fa_method FROM users WHERE id=?',
+      [req.user.id]
+    );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     const u = rows[0];
     if (u.social_links) try { u.social_links = JSON.parse(u.social_links); } catch { u.social_links = {}; }
@@ -596,8 +646,10 @@ app.put('/api/profile', authMiddleware, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { name, email, whatsapp, about, address, profile_pic, social_links, business_hours } = req.body;
   try {
-    await pool.execute('UPDATE users SET name=?,email=?,whatsapp=?,about=?,address=?,profile_pic=?,social_links=?,business_hours=? WHERE id=?',
-      [name, email, whatsapp, about, address, profile_pic, JSON.stringify(social_links || {}), JSON.stringify(business_hours || {}), req.user.id]);
+    await pool.execute(
+      'UPDATE users SET name=?,email=?,whatsapp=?,about=?,address=?,profile_pic=?,social_links=?,business_hours=? WHERE id=?',
+      [name, email, whatsapp, about, address, profile_pic, JSON.stringify(social_links || {}), JSON.stringify(business_hours || {}), req.user.id]
+    );
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -606,6 +658,8 @@ app.put('/api/profile/password', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Both passwords required' });
+  if (newPassword.length < 6) return res.status(400).json({ error: 'New password too short (min 6 chars)' });
   try {
     const [rows] = await pool.execute('SELECT password FROM users WHERE id=?', [req.user.id]);
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
@@ -618,22 +672,33 @@ app.put('/api/profile/password', authMiddleware, async (req, res) => {
 app.put('/api/profile/2fa', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
-  const { enabled, otp } = req.body;
-  // Verify OTP before enabling 2FA
+  const { enabled, otp, method } = req.body;
+
   if (enabled) {
+    if (method === 'totp') {
+      const stored = otpStore.get('totp_setup_' + req.user.username);
+      if (!stored || Date.now() > stored.expires) return res.status(400).json({ error: 'TOTP setup expired. Please restart.' });
+      const verified = speakeasy.totp.verify({ secret: stored.secret, encoding: 'base32', token: otp, window: 2 });
+      if (!verified) return res.status(400).json({ error: 'Invalid code. Check your authenticator app.' });
+      otpStore.delete('totp_setup_' + req.user.username);
+      await pool.execute('UPDATE users SET two_fa_enabled=1, two_fa_method="totp", totp_secret=? WHERE id=?', [stored.secret, req.user.id]);
+      return res.json({ success: true });
+    }
+    // OTP method (WhatsApp or Email)
     const stored = otpStore.get('2fa_' + req.user.username);
     if (!stored || stored.otp !== otp || Date.now() > stored.expires) {
       return res.status(400).json({ error: 'Invalid or expired OTP. Please request a new one.' });
     }
     otpStore.delete('2fa_' + req.user.username);
+    await pool.execute('UPDATE users SET two_fa_enabled=1, two_fa_method="otp", totp_secret=NULL WHERE id=?', [req.user.id]);
+    return res.json({ success: true });
   }
-  try {
-    await pool.execute('UPDATE users SET two_fa_enabled=? WHERE id=?', [enabled ? 1 : 0, req.user.id]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+
+  await pool.execute('UPDATE users SET two_fa_enabled=0, two_fa_method=NULL WHERE id=?', [req.user.id]);
+  res.json({ success: true });
 });
 
-// ==================== STATS ====================
+// ── Stats ───────────────────────────────────────────────────
 app.get('/api/stats', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json({ messages: 0, contacts: 0, leads: 0, broadcasts: 0, todayMessages: 0, todayLeads: 0 });
@@ -648,7 +713,7 @@ app.get('/api/stats', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== CONTACTS ====================
+// ── Contacts ────────────────────────────────────────────────
 app.get('/api/contacts', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json({ contacts: [], total: 0 });
@@ -671,6 +736,7 @@ app.post('/api/contacts', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { name, phone, segment } = req.body;
+  if (!phone) return res.status(400).json({ error: 'Phone required' });
   try {
     await pool.execute('INSERT IGNORE INTO contacts (name, phone, segment) VALUES (?,?,?)', [name, phone, segment || 'General']);
     res.json({ success: true });
@@ -693,7 +759,7 @@ app.post('/api/contacts/import', authMiddleware, upload.single('file'), async (r
         catch { failed++; }
       }
     }
-    fs.unlink(req.file.path, () => { });
+    fs.unlink(req.file.path, () => {});
     res.json({ success: true, imported, failed });
   });
 });
@@ -723,7 +789,7 @@ app.delete('/api/contacts/:id', authMiddleware, adminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== CHAT ====================
+// ── Chat ────────────────────────────────────────────────────
 app.get('/api/chats', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
@@ -733,7 +799,8 @@ app.get('/api/chats', authMiddleware, async (req, res) => {
         (SELECT content FROM messages WHERE contact_phone=c.phone ORDER BY created_at DESC LIMIT 1) as last_msg,
         (SELECT message_type FROM messages WHERE contact_phone=c.phone ORDER BY created_at DESC LIMIT 1) as last_msg_type,
         (SELECT created_at FROM messages WHERE contact_phone=c.phone ORDER BY created_at DESC LIMIT 1) as last_msg_time,
-        (SELECT COUNT(*) FROM messages WHERE contact_phone=c.phone AND direction='inbound' AND created_at > COALESCE(c.last_message,'2000-01-01')) as unread,
+        (SELECT COUNT(*) FROM messages WHERE contact_phone=c.phone AND direction='inbound'
+          AND created_at > COALESCE(c.last_read_at, '2000-01-01')) as unread,
         (SELECT agent_mode FROM bot_sessions WHERE phone=c.phone) as agent_mode
       FROM contacts c WHERE c.status='active'
       ORDER BY last_msg_time DESC LIMIT 100
@@ -748,6 +815,16 @@ app.get('/api/chats/:phone', authMiddleware, async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM messages WHERE contact_phone=? ORDER BY created_at ASC LIMIT 300', [req.params.phone]);
     res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Mark messages as read when chat is opened
+app.post('/api/chats/:phone/read', authMiddleware, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.json({ success: true });
+  try {
+    await pool.execute('UPDATE contacts SET last_read_at=NOW() WHERE phone=?', [req.params.phone]);
+    res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -783,7 +860,7 @@ app.post('/api/chats/:phone/agent', authMiddleware, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== BROADCAST ====================
+// ── Broadcast ────────────────────────────────────────────────
 app.post('/api/broadcast', authMiddleware, async (req, res) => {
   const pool = getPool();
   const { name, templateName, variables, segment, phones } = req.body;
@@ -802,32 +879,45 @@ app.post('/api/broadcast', authMiddleware, async (req, res) => {
     }
   }
   if (!contactList.length) return res.status(400).json({ error: 'No contacts found' });
+
   let broadcastId = null;
   if (pool) {
-    const [r] = await pool.execute('INSERT INTO broadcasts (name, template_name, template_variables, segment, total_contacts, status) VALUES (?,?,?,?,?,"sending")',
-      [name, templateName, JSON.stringify(variables), segment || 'all', contactList.length]);
+    const [r] = await pool.execute(
+      'INSERT INTO broadcasts (name, template_name, template_variables, segment, total_contacts, status) VALUES (?,?,?,?,?,"sending")',
+      [name, templateName, JSON.stringify(variables), segment || 'all', contactList.length]
+    );
     broadcastId = r.insertId;
   }
   res.json({ success: true, broadcastId, totalContacts: contactList.length });
 
+  // FIX: Broadcast IIFE now has try/catch — can't get stuck at "sending"
   (async () => {
     let sent = 0, failed = 0;
-    for (const contact of contactList) {
-      const finalVars = variables.map((v, i) => (i === 0 && (!v || v === '{{name}}')) ? (contact.name || 'Student') : (v || ''));
-      const result = await sendTemplate(contact.phone, templateName, finalVars);
-      if (result.success) {
-        sent++;
-        if (pool) { await pool.execute('INSERT INTO broadcast_logs (broadcast_id, phone, name, status) VALUES (?,?,?,"sent")', [broadcastId, contact.phone, contact.name]); await saveMessage(contact.phone, contact.name, 'outbound', `[Template: ${templateName}]`); }
-      } else {
-        failed++;
-        if (pool) await pool.execute('INSERT INTO broadcast_logs (broadcast_id, phone, name, status, error_msg) VALUES (?,?,?,"failed",?)', [broadcastId, contact.phone, contact.name, result.error]);
+    try {
+      for (const contact of contactList) {
+        const finalVars = variables.map((v, i) => (i === 0 && (!v || v === '{{name}}')) ? (contact.name || 'Student') : (v || ''));
+        const result = await sendTemplate(contact.phone, templateName, finalVars);
+        if (result.success) {
+          sent++;
+          if (pool) {
+            await pool.execute('INSERT INTO broadcast_logs (broadcast_id, phone, name, status) VALUES (?,?,?,"sent")', [broadcastId, contact.phone, contact.name]);
+            await saveMessage(contact.phone, contact.name, 'outbound', `[Template: ${templateName}]`);
+          }
+        } else {
+          failed++;
+          if (pool) await pool.execute('INSERT INTO broadcast_logs (broadcast_id, phone, name, status, error_msg) VALUES (?,?,?,"failed",?)', [broadcastId, contact.phone, contact.name, result.error]);
+        }
+        if (pool && broadcastId) await pool.execute('UPDATE broadcasts SET sent=?, failed=? WHERE id=?', [sent, failed, broadcastId]);
+        broadcast({ type: 'broadcast_progress', broadcastId, sent, failed, total: contactList.length });
+        await new Promise(r => setTimeout(r, 150));
       }
-      if (pool && broadcastId) { await pool.execute('UPDATE broadcasts SET sent=?, failed=? WHERE id=?', [sent, failed, broadcastId]); }
-      broadcast({ type: 'broadcast_progress', broadcastId, sent, failed, total: contactList.length });
-      await new Promise(r => setTimeout(r, 150));
+      if (pool && broadcastId) await pool.execute('UPDATE broadcasts SET status="completed", completed_at=NOW() WHERE id=?', [broadcastId]);
+      broadcast({ type: 'broadcast_complete', broadcastId, sent, failed });
+    } catch (err) {
+      console.error('Broadcast error:', err.message);
+      if (pool && broadcastId) await pool.execute('UPDATE broadcasts SET status="failed" WHERE id=?', [broadcastId]);
+      broadcast({ type: 'broadcast_complete', broadcastId, sent, failed, error: err.message });
     }
-    if (pool && broadcastId) await pool.execute('UPDATE broadcasts SET status="completed", completed_at=NOW() WHERE id=?', [broadcastId]);
-    broadcast({ type: 'broadcast_complete', broadcastId, sent, failed });
   })();
 });
 
@@ -837,12 +927,12 @@ app.post('/api/broadcasts/:id/resend-failed', authMiddleware, async (req, res) =
   try {
     const [[b]] = await pool.execute('SELECT * FROM broadcasts WHERE id=?', [req.params.id]);
     if (!b) return res.status(404).json({ error: 'Not found' });
-    const [failed] = await pool.execute('SELECT * FROM broadcast_logs WHERE broadcast_id=? AND status="failed"', [req.params.id]);
-    if (!failed.length) return res.json({ success: true, message: 'No failed messages' });
+    const [failedLogs] = await pool.execute('SELECT * FROM broadcast_logs WHERE broadcast_id=? AND status="failed"', [req.params.id]);
+    if (!failedLogs.length) return res.json({ success: true, message: 'No failed messages' });
     const variables = JSON.parse(b.template_variables || '[]');
-    res.json({ success: true, message: `Resending to ${failed.length} contacts` });
+    res.json({ success: true, message: `Resending to ${failedLogs.length} contacts` });
     (async () => {
-      for (const log of failed) {
+      for (const log of failedLogs) {
         const finalVars = variables.map((v, i) => i === 0 ? (log.name || 'Student') : v);
         const result = await sendTemplate(log.phone, b.template_name, finalVars);
         await pool.execute('UPDATE broadcast_logs SET status=?, error_msg=? WHERE id=?', [result.success ? 'sent' : 'failed', result.success ? null : result.error, log.id]);
@@ -877,7 +967,7 @@ app.get('/api/broadcasts/:id/progress', authMiddleware, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== TEMPLATES ====================
+// ── Templates ────────────────────────────────────────────────
 app.get('/api/templates', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
@@ -893,8 +983,7 @@ app.post('/api/templates', authMiddleware, adminOnly, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { name, template_name, category, variables, body } = req.body;
   try {
-    await pool.execute('INSERT INTO templates (name, template_name, category, variables, body) VALUES (?,?,?,?,?)',
-      [name, template_name, category, JSON.stringify(variables), body]);
+    await pool.execute('INSERT INTO templates (name, template_name, category, variables, body) VALUES (?,?,?,?,?)', [name, template_name, category, JSON.stringify(variables), body]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -904,8 +993,7 @@ app.put('/api/templates/:id', authMiddleware, adminOnly, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { name, template_name, category, variables, body } = req.body;
   try {
-    await pool.execute('UPDATE templates SET name=?,template_name=?,category=?,variables=?,body=? WHERE id=?',
-      [name, template_name, category, JSON.stringify(variables), body, req.params.id]);
+    await pool.execute('UPDATE templates SET name=?,template_name=?,category=?,variables=?,body=? WHERE id=?', [name, template_name, category, JSON.stringify(variables), body, req.params.id]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -917,7 +1005,7 @@ app.delete('/api/templates/:id', authMiddleware, adminOnly, async (req, res) => 
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== BOT FLOWS ====================
+// ── Bot flows ────────────────────────────────────────────────
 app.get('/api/bot-flows', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
@@ -933,8 +1021,7 @@ app.put('/api/bot-flows/:id', authMiddleware, adminOnly, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { message, buttons, is_active } = req.body;
   try {
-    await pool.execute('UPDATE bot_flows SET message=?, buttons=?, is_active=? WHERE id=?',
-      [message, JSON.stringify(buttons), is_active ? 1 : 0, req.params.id]);
+    await pool.execute('UPDATE bot_flows SET message=?, buttons=?, is_active=? WHERE id=?', [message, JSON.stringify(buttons), is_active ? 1 : 0, req.params.id]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -944,8 +1031,7 @@ app.post('/api/bot-flows', authMiddleware, adminOnly, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { trigger_key, message, buttons, action } = req.body;
   try {
-    await pool.execute('INSERT INTO bot_flows (trigger_key, message, buttons, action) VALUES (?,?,?,?)',
-      [trigger_key, message, JSON.stringify(buttons), action]);
+    await pool.execute('INSERT INTO bot_flows (trigger_key, message, buttons, action) VALUES (?,?,?,?)', [trigger_key, message, JSON.stringify(buttons), action]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -957,7 +1043,7 @@ app.delete('/api/bot-flows/:id', authMiddleware, adminOnly, async (req, res) => 
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== LEADS ====================
+// ── Leads ────────────────────────────────────────────────────
 app.get('/api/leads', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
@@ -984,21 +1070,22 @@ app.put('/api/leads/:id', authMiddleware, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== SETTINGS ====================
+// ── Settings ─────────────────────────────────────────────────
 app.get('/api/settings', authMiddleware, (req, res) => {
   res.json({
     phoneNumberId: PHONE_ID ? '••••' + PHONE_ID.slice(-4) : 'Not set',
     tokenSet: !!WA_TOKEN,
     verifyToken: VERIFY_TOKEN,
-    webhookUrl: `${req.protocol}://${req.get('host')}/webhook`
+    webhookUrl: `${req.protocol}://${req.get('host')}/webhook`,
+    waConfigured: !!(WA_TOKEN && PHONE_ID)
   });
 });
 
-// ==================== USERS ====================
+// ── Users ────────────────────────────────────────────────────
 app.get('/api/users', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json([]);
-  try { const [rows] = await pool.execute('SELECT id, username, name, role, email, whatsapp, is_active, two_fa_enabled, created_at FROM users'); res.json(rows); }
+  try { const [rows] = await pool.execute('SELECT id, username, name, role, email, whatsapp, is_active, two_fa_enabled, two_fa_method, created_at FROM users'); res.json(rows); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1006,10 +1093,10 @@ app.post('/api/users', authMiddleware, adminOnly, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'No DB' });
   const { username, password, name, role, email, whatsapp } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
   try {
     const hashed = bcrypt.hashSync(password, 10);
-    await pool.execute('INSERT INTO users (username, password, name, role, email, whatsapp) VALUES (?,?,?,?,?,?)',
-      [username, hashed, name, role || 'agent', email || null, whatsapp || null]);
+    await pool.execute('INSERT INTO users (username, password, name, role, email, whatsapp) VALUES (?,?,?,?,?,?)', [username, hashed, name, role || 'agent', email || null, whatsapp || null]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1020,18 +1107,21 @@ app.put('/api/users/:id', authMiddleware, adminOnly, async (req, res) => {
   const { name, role, is_active, password, email, whatsapp } = req.body;
   try {
     if (password) {
-      await pool.execute('UPDATE users SET name=?,role=?,is_active=?,password=?,email=?,whatsapp=? WHERE id=?',
-        [name, role, is_active, bcrypt.hashSync(password, 10), email, whatsapp, req.params.id]);
+      await pool.execute('UPDATE users SET name=?,role=?,is_active=?,password=?,email=?,whatsapp=? WHERE id=?', [name, role, is_active, bcrypt.hashSync(password, 10), email, whatsapp, req.params.id]);
     } else {
-      await pool.execute('UPDATE users SET name=?,role=?,is_active=?,email=?,whatsapp=? WHERE id=?',
-        [name, role, is_active, email, whatsapp, req.params.id]);
+      await pool.execute('UPDATE users SET name=?,role=?,is_active=?,email=?,whatsapp=? WHERE id=?', [name, role, is_active, email, whatsapp, req.params.id]);
     }
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ==================== HEALTH ====================
-app.get('/api/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString(), db: !!getPool() }));
+// ── Health ───────────────────────────────────────────────────
+app.get('/api/health', (req, res) => res.json({
+  status: 'ok',
+  time: new Date().toISOString(),
+  db: !!getPool(),
+  whatsapp: !!(WA_TOKEN && PHONE_ID)
+}));
 
 // Serve frontend
 app.get('*', (req, res) => {
@@ -1040,7 +1130,6 @@ app.get('*', (req, res) => {
   }
 });
 
-// Global error handler
 app.use((err, req, res, next) => {
   console.error('Global error:', err.message);
   res.status(500).json({ error: 'Server error', message: err.message });
@@ -1049,9 +1138,10 @@ app.use((err, req, res, next) => {
 async function start() {
   await initDB();
   server.listen(PORT, () => {
-    console.log(`🚀 Ghazala WhatsApp System on port ${PORT}`);
+    console.log(`🚀 Ghazala WhatsApp System running on port ${PORT}`);
     console.log(`📊 Dashboard: http://localhost:${PORT}`);
-    console.log(`🔗 Webhook: http://localhost:${PORT}/webhook`);
+    console.log(`🔗 Webhook:   http://localhost:${PORT}/webhook`);
+    if (!WA_TOKEN || !PHONE_ID) console.warn('⚠️  WhatsApp API not configured — messaging disabled until env vars are set');
   });
 }
 
