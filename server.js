@@ -19,8 +19,8 @@ require('dotenv').config();
 const { initDB, getPool } = require('./database');
 
 const app = express();
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const PORT = process.env.PORT || 3000;
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 
 // ── Startup warnings ────────────────────────────────────────
