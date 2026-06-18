@@ -34,7 +34,8 @@ app.use(cors({ origin: ALLOWED_ORIGIN }));
 
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve static files from root directory (where index.html lives)
+app.use(express.static(__dirname));
 
 const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 } });
 
@@ -1128,10 +1129,23 @@ app.get('/api/health', (req, res) => res.json({
 }));
 
 // Serve frontend
+const INDEX_PATH = path.join(__dirname, 'index.html');
+
 app.get('*', (req, res) => {
-  if (!req.path.startsWith('/api') && !req.path.startsWith('/webhook')) {
-    res.sendFile(path.join(__dirname, 'index.html'));
-  }
+  if (req.path.startsWith('/api') || req.path.startsWith('/webhook')) return;
+  res.sendFile(INDEX_PATH, err => {
+    if (err) {
+      res.status(503).send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Ghazala CRM</title>
+<style>body{font-family:sans-serif;background:#0a1a0a;color:#25D366;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:16px;}
+p{color:#888;font-size:14px;max-width:400px;text-align:center;line-height:1.6;}code{background:#1a2a1a;padding:3px 8px;border-radius:4px;font-size:12px;color:#aaa;}</style>
+</head><body>
+<h2>⚠️ index.html not found</h2>
+<p>The dashboard file is missing from the deployment.<br>Make sure <code>index.html</code> is in the same folder as <code>server.js</code> and is committed to git.</p>
+<p style="color:#555">Looking for: <code>${INDEX_PATH}</code></p>
+</body></html>`);
+    }
+  });
 });
 
 app.use((err, req, res, next) => {
