@@ -642,8 +642,16 @@ select.inp option{background:var(--surface2);}
           <input class="search-inp" type="text" placeholder="🔍 Search..." id="contactSearch" oninput="contactPage=1;loadContacts()">
           <select class="select-inp" id="contactSegment" onchange="contactPage=1;loadContacts()">
             <option value="">All Segments</option>
-            <option>General</option><option>Imported</option>
+            <option>General</option><option>New Leads</option><option>Imported</option>
           </select>
+          <select class="select-inp" id="contactStatus" onchange="contactPage=1;loadContacts()">
+            <option value="">All Status</option>
+            <option value="active">Active</option>
+            <option value="opted_out">Opted Out</option>
+            <option value="blocked">Blocked</option>
+          </select>
+          <input class="select-inp" type="date" id="contactFrom" onchange="contactPage=1;loadContacts()" placeholder="From">
+          <input class="select-inp" type="date" id="contactTo" onchange="contactPage=1;loadContacts()" placeholder="To">
           <button class="btn btn-primary btn-sm" onclick="openAddContact()">+ Add</button>
           <button class="btn btn-ghost btn-sm" onclick="openImportContacts()">📥 Import CSV</button>
           <button class="btn btn-ghost btn-sm" onclick="exportContacts()">📤 Download</button>
@@ -1867,8 +1875,14 @@ function exportLeads() {
 async function loadContacts() {
   const search = document.getElementById('contactSearch')?.value || '';
   const segment = document.getElementById('contactSegment')?.value || '';
+  const status = document.getElementById('contactStatus')?.value || '';
+  const from = document.getElementById('contactFrom')?.value || '';
+  const to = document.getElementById('contactTo')?.value || '';
   let url = `/api/contacts?page=${contactPage}&limit=${contactLimit}&search=${encodeURIComponent(search)}`;
   if (segment) url += `&segment=${encodeURIComponent(segment)}`;
+  if (status) url += `&status=${encodeURIComponent(status)}`;
+  if (from) url += `&from=${from}`;
+  if (to) url += `&to=${to}`;
   const data = await apiFetch(url);
   const el = document.getElementById('contactsList');
   const contacts = data?.contacts || data || [];
@@ -1887,7 +1901,10 @@ async function loadContacts() {
         <td><span class="pill pill-muted">${escapeHtml(c.segment||'General')}</span></td>
         <td><span class="pill ${c.status==='active'?'pill-green':c.status==='opted_out'?'pill-gold':'pill-red'}">${c.status}</span></td>
         <td style="color:var(--muted);font-size:12px;">${formatDate(c.last_message)}</td>
-        <td><button class="btn btn-ghost btn-sm" onclick="goToChat('${c.phone}')">💬 Chat</button></td>
+        <td style="display:flex;gap:6px;">
+          <button class="btn btn-ghost btn-sm" onclick="openEditContact(${c.id})">✏️ Edit</button>
+          <button class="btn btn-ghost btn-sm" onclick="goToChat('${c.phone}')">💬 Chat</button>
+        </td>
       </tr>`).join('')}
     </tbody></table>`;
 
@@ -1903,6 +1920,46 @@ async function loadContacts() {
     pgHtml += `<span style="font-size:12px;color:var(--muted);">${total} total</span>`;
   }
   document.getElementById('contactsPagination').innerHTML = pgHtml;
+}
+
+function openEditContact(id) {
+  apiFetch(`/api/contacts?page=1&limit=100000`).then(data => {
+    const c = (data?.contacts || []).find(x => x.id === id);
+    if (!c) return showToast('Contact not found', 'error');
+    openModal('✏️ Edit Contact', `
+      <div class="form-row"><label>Name</label><input class="inp" id="m_name" value="${escapeHtml(c.name||'')}" placeholder="Student name"></div>
+      <div class="form-row"><label>Phone (with country code)</label><input class="inp" id="m_phone" value="${escapeHtml(c.phone||'')}" placeholder="923001234567"></div>
+      <div class="form-row"><label>Segment</label>
+        <select class="inp" id="m_seg">
+          <option ${c.segment==='General'?'selected':''}>General</option>
+          <option ${c.segment==='New Leads'?'selected':''}>New Leads</option>
+          <option ${c.segment==='Imported'?'selected':''}>Imported</option>
+        </select>
+      </div>
+      <div class="form-row"><label>Status</label>
+        <select class="inp" id="m_status">
+          <option value="active" ${c.status==='active'?'selected':''}>Active</option>
+          <option value="opted_out" ${c.status==='opted_out'?'selected':''}>Opted Out</option>
+          <option value="blocked" ${c.status==='blocked'?'selected':''}>Blocked</option>
+        </select>
+      </div>`, async () => {
+      const phone = document.getElementById('m_phone').value.trim();
+      if (!phone) return modalShowError('Phone number required');
+      const r = await apiFetch(`/api/contacts/${id}`, { method:'PUT', body:JSON.stringify({
+        name: document.getElementById('m_name').value,
+        phone,
+        segment: document.getElementById('m_seg').value,
+        status: document.getElementById('m_status').value
+      })});
+      if (r?.success) {
+        closeModal();
+        loadContacts();
+        showToast('✅ Contact updated');
+      } else {
+        modalShowError(r?.error || 'Failed to update contact');
+      }
+    });
+  });
 }
 
 function openAddContact() {
@@ -1965,8 +2022,14 @@ function downloadCSV(csvContent, filename) {
 async function exportContacts() {
   const search = document.getElementById('contactSearch')?.value || '';
   const segment = document.getElementById('contactSegment')?.value || '';
+  const status = document.getElementById('contactStatus')?.value || '';
+  const from = document.getElementById('contactFrom')?.value || '';
+  const to = document.getElementById('contactTo')?.value || '';
   let url = `/api/contacts?page=1&limit=100000&search=${encodeURIComponent(search)}`;
   if (segment) url += `&segment=${encodeURIComponent(segment)}`;
+  if (status) url += `&status=${encodeURIComponent(status)}`;
+  if (from) url += `&from=${from}`;
+  if (to) url += `&to=${to}`;
   const data = await apiFetch(url);
   const contacts = data?.contacts || data || [];
   if (!contacts.length) return showToast('No contacts to export yet — add some first', 'error');
