@@ -40,6 +40,7 @@ async function createTables() {
         name VARCHAR(255),
         phone VARCHAR(20) UNIQUE NOT NULL,
         segment VARCHAR(100) DEFAULT 'General',
+        mode VARCHAR(20) DEFAULT NULL,
         status ENUM('active','opted_out','blocked') DEFAULT 'active',
         last_message DATETIME,
         last_read_at DATETIME DEFAULT NULL,
@@ -184,6 +185,7 @@ async function createTables() {
       ['users', 'two_fa_method VARCHAR(20) DEFAULT NULL'],
       ['users', 'totp_secret VARCHAR(255) DEFAULT NULL'],
       ['contacts', 'last_read_at DATETIME DEFAULT NULL'],
+      ['contacts', 'mode VARCHAR(20) DEFAULT NULL'],
     ];
     for (const [tbl, col] of upgradeColumns) {
       try { await conn.execute(`ALTER TABLE ${tbl} ADD COLUMN ${col}`); } catch (e) { /* column already exists */ }
