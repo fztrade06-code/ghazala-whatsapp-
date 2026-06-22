@@ -818,13 +818,22 @@ app.post('/api/contacts/import', authMiddleware, upload.single('file'), async (r
   fs.createReadStream(req.file.path).pipe(csv()).on('data', d => results.push(d)).on('end', async () => {
     let imported = 0, failed = 0;
     for (const row of results) {
-      const phone = (row.phone || row.Phone || row.number || row.Number || row.mobile || row.Mobile || '').toString().trim();
-      const name = row.name || row.Name || '';
+      const rawPhone = (row.phone || row.Phone || row.number || row.Number || row.mobile || row.Mobile || '').toString();
+      const phone = rawPhone.trim().replace(/[^\d]/g, '');
+      const name = row.name || row.Name || null;
       const segment = row.segment || row.Segment || 'Imported';
+      const mode = row.mode || row.Mode || null;
       if (phone) {
-        try { await pool.execute('INSERT IGNORE INTO contacts (name, phone, segment) VALUES (?,?,?)', [name, phone, segment]); imported++; }
-        catch { failed++; }
-      }
+        try {
+          const [existing] = await pool.execute('SELECT id FROM contacts WHERE phone=?', [phone]);
+          if (existing.length > 0) {
+            await pool.execute('UPDATE contacts SET name=COALESCE(?,name), segment=?, mode=COALESCE(?,mode) WHERE phone=?', [name, segment, mode, phone]);
+          } else {
+            await pool.execute('INSERT INTO contacts (name, phone, segment, mode, status, last_message) VALUES (?,?,?,?,"active",NOW())', [name, phone, segment, mode]);
+          }
+          imported++;
+        } catch (err) { console.error('Import row error:', err.message); failed++; }
+      } else { failed++; }
     }
     fs.unlink(req.file.path, () => {});
     res.json({ success: true, imported, failed });
