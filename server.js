@@ -37,7 +37,7 @@ app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 // Serve static files from root directory (where index.html lives)
 app.use(express.static(__dirname));
 
-const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 } });
+const upload = multer({ dest: 'uploads/', limits: { fileSize: 90 * 1024 * 1024 } });
 
 const WA_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_ID = process.env.PHONE_NUMBER_ID;
@@ -201,6 +201,44 @@ async function sendMediaMessage(phone, mediaType, mediaUrl, caption = '') {
     const waType = { image: 'image', video: 'video', audio: 'audio', document: 'document' }[mediaType] || 'document';
     const mediaObj = { link: mediaUrl };
     if (caption && ['image', 'video', 'document'].includes(waType)) mediaObj.caption = caption;
+    const r = await axios.post(WA_API, {
+      messaging_product: 'whatsapp', to: phone, type: waType, [waType]: mediaObj
+    }, { headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
+    return { success: true, data: r.data };
+  } catch (err) {
+    return { success: false, error: err.response?.data?.error?.message || err.message };
+  }
+}
+
+// Upload a local file directly to WhatsApp's Media API — returns a media_id (no public URL needed)
+async function uploadMediaToWhatsApp(filePath, mimeType) {
+  if (!WA_TOKEN || !PHONE_ID) return { success: false, error: 'WhatsApp not configured' };
+  try {
+    const fileBuffer = fs.readFileSync(filePath);
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('type', mimeType);
+    form.append('file', new Blob([fileBuffer], { type: mimeType }), 'upload');
+    const uploadRes = await fetch(`https://graph.facebook.com/v18.0/${PHONE_ID}/media`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${WA_TOKEN}` },
+      body: form
+    });
+    const data = await uploadRes.json();
+    if (data.id) return { success: true, mediaId: data.id };
+    return { success: false, error: data.error?.message || 'Upload to WhatsApp failed' };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// Send a message using a WhatsApp media_id (from a direct upload) instead of a public link
+async function sendMediaByIdMessage(phone, waType, mediaId, caption = '', filename = '') {
+  if (!WA_API || !WA_TOKEN) return { success: false, error: 'WhatsApp not configured' };
+  try {
+    const mediaObj = { id: mediaId };
+    if (caption && ['image', 'video', 'document'].includes(waType)) mediaObj.caption = caption;
+    if (waType === 'document' && filename) mediaObj.filename = filename;
     const r = await axios.post(WA_API, {
       messaging_product: 'whatsapp', to: phone, type: waType, [waType]: mediaObj
     }, { headers: { Authorization: `Bearer ${WA_TOKEN}`, 'Content-Type': 'application/json' } });
@@ -918,6 +956,38 @@ app.post('/api/chats/:phone/send', authMiddleware, async (req, res) => {
     }
     res.json({ success: true, result });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Direct file upload from agent's device — no public URL needed.
+// Uploads the file straight to WhatsApp's Media API and sends it by media_id.
+app.post('/api/chats/:phone/send-media-file', authMiddleware, upload.single('file'), async (req, res) => {
+  const phone = req.params.phone;
+  const caption = req.body.caption || '';
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const mimeType = req.file.mimetype || 'application/octet-stream';
+    const originalName = req.file.originalname || 'file';
+
+    let waType = 'document';
+    if (mimeType.startsWith('image/')) waType = 'image';
+    else if (mimeType.startsWith('video/')) waType = 'video';
+    else if (mimeType.startsWith('audio/')) waType = 'audio';
+
+    const upload = await uploadMediaToWhatsApp(req.file.path, mimeType);
+    fs.unlink(req.file.path, () => {});
+
+    if (!upload.success) return res.status(500).json({ error: upload.error || 'Failed to upload to WhatsApp' });
+
+    const result = await sendMediaByIdMessage(phone, waType, upload.mediaId, caption, originalName);
+    if (!result.success) return res.status(500).json({ error: result.error || 'Failed to send media' });
+
+    await saveMessage(phone, null, 'outbound', caption || `[${waType}: ${originalName}]`, null, waType, null);
+    res.json({ success: true });
+  } catch (err) {
+    if (req.file?.path) fs.unlink(req.file.path, () => {});
+    console.error('send-media-file error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/chats/:phone/agent', authMiddleware, async (req, res) => {
