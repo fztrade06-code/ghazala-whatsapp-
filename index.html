@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ghazala Institute — WhatsApp System</title>
-<!-- BUILD_VERSION: 2026-06-22-contacts-fix-v2 -->
+<!-- BUILD_VERSION: 2026-06-22-segment-mode-v3 -->
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -2042,18 +2042,39 @@ function openAddContact() {
 
 function openImportContacts() {
   openModal('📥 Import Contacts CSV', `
-    <div class="info-box"><b>CSV Format:</b><br>name,phone,segment<br>Ali Khan,923001234567,General</div>
+    <div class="info-box">
+      <b>CSV Format:</b><br>name,phone,segment,mode<br>Ali Khan,923001234567,General,Onsite
+      <div style="margin-top:8px;font-size:11px;color:var(--muted);">Only <code>phone</code> is required. Segment options: General, German, IELTS, PTE, English, Study Abroad. Mode: Onsite or Online.</div>
+    </div>
+    <button class="btn btn-ghost btn-sm" style="margin:10px 0;" onclick="downloadSampleContactsCSV()">📥 Download Sample CSV</button>
     <div class="form-row"><label>Select CSV File</label><input type="file" class="inp" id="m_csv" accept=".csv"></div>
   `, async () => {
     const file = document.getElementById('m_csv').files[0];
-    if (!file) return showToast('Select a file', 'error');
+    if (!file) return modalShowError('Select a file');
     const formData = new FormData();
     formData.append('file', file);
     const res = await fetch(`${API}/api/contacts/import`, { method:'POST', headers:{Authorization:`Bearer ${authToken}`}, body:formData });
     const r = await res.json();
-    if (r?.success) { closeModal(); loadContacts(); showToast(`✅ Imported ${r.imported}, failed ${r.failed}`); }
-    else showToast(r?.error||'Import failed', 'error');
+    if (r?.success) {
+      closeModal();
+      contactPage = 1;
+      loadContacts();
+      showToast(`✅ Imported ${r.imported}, failed ${r.failed}`);
+    } else {
+      modalShowError(r?.error || 'Import failed');
+    }
   });
+}
+
+function downloadSampleContactsCSV() {
+  const csv = [
+    'name,phone,segment,mode',
+    'Ahmed Ali,923001234567,German,Onsite',
+    'Sara Khan,923009876543,IELTS,Online',
+    'Bilal Hussain,923001112222,Study Abroad,'
+  ].join('\r\n');
+  downloadCSV(csv, 'ghazala_contacts_sample.csv');
+  showToast('📥 Sample CSV downloaded');
 }
 
 // Reliable CSV download — works on mobile browsers where data: URI downloads often silently fail
