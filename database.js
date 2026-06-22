@@ -189,6 +189,11 @@ async function createTables() {
       try { await conn.execute(`ALTER TABLE ${tbl} ADD COLUMN ${col}`); } catch (e) { /* column already exists */ }
     }
 
+    // Add 'active' status option to leads (MODIFY is safe to re-run every startup)
+    try {
+      await conn.execute(`ALTER TABLE leads MODIFY status ENUM('active','new','contacted','enrolled','dropped') DEFAULT 'new'`);
+    } catch (e) { /* already up to date */ }
+
     const bcrypt = require('bcryptjs');
     const adminPass = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'ghazala123', 10);
     await conn.execute(`
