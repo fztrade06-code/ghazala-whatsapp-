@@ -646,6 +646,12 @@ select.inp option{background:var(--surface2);}
           <select class="select-inp" id="contactSegment" onchange="contactPage=1;loadContacts()">
             <option value="">All Segments</option>
             <option>General</option><option>New Leads</option><option>Imported</option>
+            <option>German</option><option>IELTS</option><option>PTE</option>
+            <option>English</option><option>Study Abroad</option>
+          </select>
+          <select class="select-inp" id="contactMode" onchange="contactPage=1;loadContacts()">
+            <option value="">All Modes</option>
+            <option>Onsite</option><option>Online</option>
           </select>
           <select class="select-inp" id="contactStatus" onchange="contactPage=1;loadContacts()">
             <option value="">All Status</option>
@@ -1878,11 +1884,13 @@ function exportLeads() {
 async function loadContacts() {
   const search = document.getElementById('contactSearch')?.value || '';
   const segment = document.getElementById('contactSegment')?.value || '';
+  const mode = document.getElementById('contactMode')?.value || '';
   const status = document.getElementById('contactStatus')?.value || '';
   const from = document.getElementById('contactFrom')?.value || '';
   const to = document.getElementById('contactTo')?.value || '';
   let url = `/api/contacts?page=${contactPage}&limit=${contactLimit}&search=${encodeURIComponent(search)}`;
   if (segment) url += `&segment=${encodeURIComponent(segment)}`;
+  if (mode) url += `&mode=${encodeURIComponent(mode)}`;
   if (status) url += `&status=${encodeURIComponent(status)}`;
   if (from) url += `&from=${from}`;
   if (to) url += `&to=${to}`;
@@ -1896,14 +1904,21 @@ async function loadContacts() {
     return;
   }
   el.innerHTML = `<table class="tbl">
-    <thead><tr><th>Name</th><th>Phone</th><th>Segment</th><th>Status</th><th>Last Message</th><th>Actions</th></tr></thead>
+    <thead><tr><th>Name</th><th>Phone</th><th>Segment</th><th>Mode</th><th>Status</th><th>Last Message</th><th>Actions</th></tr></thead>
     <tbody>${contacts.map(c => `
       <tr>
         <td><div style="display:flex;align-items:center;gap:9px;"><div class="av">${(c.name||c.phone)[0].toUpperCase()}</div>${escapeHtml(c.name||'—')}</div></td>
         <td>${c.phone}</td>
         <td>
-          <select class="inp" style="padding:4px 8px;font-size:11px;width:110px;" onchange="updateContactSegment(${c.id},this.value)">
-            ${['General','New Leads','Imported'].map(s=>`<option ${ (c.segment||'General')===s?'selected':''}>${s}</option>`).join('')}
+          <select class="inp" style="padding:4px 8px;font-size:11px;width:120px;" onchange="updateContactSegment(${c.id},this.value)">
+            ${['General','New Leads','Imported','German','IELTS','PTE','English','Study Abroad'].map(s=>`<option ${ (c.segment||'General')===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </td>
+        <td>
+          <select class="inp" style="padding:4px 8px;font-size:11px;width:90px;" onchange="updateContactMode(${c.id},this.value)">
+            <option value="" ${!c.mode?'selected':''}>—</option>
+            <option ${c.mode==='Onsite'?'selected':''}>Onsite</option>
+            <option ${c.mode==='Online'?'selected':''}>Online</option>
           </select>
         </td>
         <td><span class="pill ${c.status==='active'?'pill-green':c.status==='opted_out'?'pill-gold':'pill-red'}">${c.status}</span></td>
@@ -1935,18 +1950,30 @@ async function updateContactSegment(id, segment) {
   else showToast(r?.error || 'Failed to update segment', 'error');
 }
 
+async function updateContactMode(id, mode) {
+  const r = await apiFetch(`/api/contacts/${id}/mode`, { method:'PUT', body:JSON.stringify({mode}) });
+  if (r?.success) showToast('Mode updated — ' + (mode || '—'));
+  else showToast(r?.error || 'Failed to update mode', 'error');
+}
+
 function openEditContact(id) {
   apiFetch(`/api/contacts?page=1&limit=100000`).then(data => {
     const c = (data?.contacts || []).find(x => x.id === id);
     if (!c) return showToast('Contact not found', 'error');
+    const segOptions = ['General','New Leads','Imported','German','IELTS','PTE','English','Study Abroad'];
     openModal('✏️ Edit Contact', `
       <div class="form-row"><label>Name</label><input class="inp" id="m_name" value="${escapeHtml(c.name||'')}" placeholder="Student name"></div>
       <div class="form-row"><label>Phone (with country code)</label><input class="inp" id="m_phone" value="${escapeHtml(c.phone||'')}" placeholder="923001234567"></div>
       <div class="form-row"><label>Segment</label>
         <select class="inp" id="m_seg">
-          <option ${c.segment==='General'?'selected':''}>General</option>
-          <option ${c.segment==='New Leads'?'selected':''}>New Leads</option>
-          <option ${c.segment==='Imported'?'selected':''}>Imported</option>
+          ${segOptions.map(s => `<option ${c.segment===s?'selected':''}>${s}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-row"><label>Mode</label>
+        <select class="inp" id="m_mode">
+          <option value="" ${!c.mode?'selected':''}>—</option>
+          <option ${c.mode==='Onsite'?'selected':''}>Onsite</option>
+          <option ${c.mode==='Online'?'selected':''}>Online</option>
         </select>
       </div>
       <div class="form-row"><label>Status</label>
@@ -1962,6 +1989,7 @@ function openEditContact(id) {
         name: document.getElementById('m_name').value,
         phone,
         segment: document.getElementById('m_seg').value,
+        mode: document.getElementById('m_mode').value,
         status: document.getElementById('m_status').value
       })});
       if (r?.success) {
@@ -1980,14 +2008,23 @@ function openAddContact() {
     <div class="form-row"><label>Name</label><input class="inp" id="m_name" placeholder="Student name"></div>
     <div class="form-row"><label>Phone (with country code)</label><input class="inp" id="m_phone" placeholder="923001234567"></div>
     <div class="form-row"><label>Segment</label>
-      <select class="inp" id="m_seg"><option>General</option><option>New Leads</option><option>Imported</option></select>
+      <select class="inp" id="m_seg">
+        <option>General</option><option>German</option><option>IELTS</option><option>PTE</option><option>English</option><option>Study Abroad</option>
+      </select>
+    </div>
+    <div class="form-row"><label>Mode</label>
+      <select class="inp" id="m_mode">
+        <option value="">—</option>
+        <option>Onsite</option><option>Online</option>
+      </select>
     </div>`, async () => {
     const phone = document.getElementById('m_phone').value.trim();
     if (!phone) return modalShowError('Phone number required');
     const r = await apiFetch('/api/contacts', { method:'POST', body:JSON.stringify({
       name: document.getElementById('m_name').value,
       phone,
-      segment: document.getElementById('m_seg').value
+      segment: document.getElementById('m_seg').value,
+      mode: document.getElementById('m_mode').value
     })});
     console.log('Add contact response:', r);
     if (r?.success) {
@@ -2035,11 +2072,13 @@ function downloadCSV(csvContent, filename) {
 async function exportContacts() {
   const search = document.getElementById('contactSearch')?.value || '';
   const segment = document.getElementById('contactSegment')?.value || '';
+  const mode = document.getElementById('contactMode')?.value || '';
   const status = document.getElementById('contactStatus')?.value || '';
   const from = document.getElementById('contactFrom')?.value || '';
   const to = document.getElementById('contactTo')?.value || '';
   let url = `/api/contacts?page=1&limit=100000&search=${encodeURIComponent(search)}`;
   if (segment) url += `&segment=${encodeURIComponent(segment)}`;
+  if (mode) url += `&mode=${encodeURIComponent(mode)}`;
   if (status) url += `&status=${encodeURIComponent(status)}`;
   if (from) url += `&from=${from}`;
   if (to) url += `&to=${to}`;
@@ -2047,8 +2086,8 @@ async function exportContacts() {
   const contacts = data?.contacts || data || [];
   if (!contacts.length) return showToast('No contacts to export yet — add some first', 'error');
   const esc = v => `"${String(v||'').replace(/"/g,'""')}"`;
-  const csv = ['Name,Phone,Segment,Status,Last Message,Added On']
-    .concat(contacts.map(c => [esc(c.name), esc(c.phone), esc(c.segment), esc(c.status), esc(formatDate(c.last_message)), esc(formatDate(c.created_at))].join(',')))
+  const csv = ['Name,Phone,Segment,Mode,Status,Last Message,Added On']
+    .concat(contacts.map(c => [esc(c.name), esc(c.phone), esc(c.segment), esc(c.mode), esc(c.status), esc(formatDate(c.last_message)), esc(formatDate(c.created_at))].join(',')))
     .join('\n');
   downloadCSV(csv, `ghazala_contacts_${new Date().toISOString().slice(0,10)}.csv`);
   showToast(`📤 Exported ${contacts.length} contacts`);
