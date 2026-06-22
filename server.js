@@ -726,8 +726,12 @@ app.get('/api/contacts', authMiddleware, async (req, res) => {
     if (status) { q += ' AND status=?'; p.push(status); }
     const countQ = q.replace('SELECT *', 'SELECT COUNT(*) as total');
     const [[{ total }]] = await pool.execute(countQ, p);
-    q += ' ORDER BY id DESC LIMIT ? OFFSET ?';
-    p.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+
+    // mysql2 prepared statements (execute) can misbehave with LIMIT/OFFSET as bound params —
+    // validate as safe integers and inline directly instead of using ? placeholders
+    const safeLimit = Math.max(1, Math.min(1000, parseInt(limit) || 50));
+    const safeOffset = Math.max(0, (parseInt(page) || 1) - 1) * safeLimit;
+    q += ` ORDER BY id DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`;
     const [rows] = await pool.execute(q, p);
     res.json({ contacts: rows, total });
   } catch (err) {
