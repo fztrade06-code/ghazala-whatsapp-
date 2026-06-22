@@ -721,11 +721,12 @@ app.get('/api/contacts', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json({ contacts: [], total: 0 });
   try {
-    const { search, segment, status, from, to, page = 1, limit = 50 } = req.query;
+    const { search, segment, status, mode, from, to, page = 1, limit = 50 } = req.query;
     let q = 'SELECT * FROM contacts WHERE 1=1', p = [];
     if (search) { q += ' AND (name LIKE ? OR phone LIKE ?)'; p.push(`%${search}%`, `%${search}%`); }
     if (segment) { q += ' AND segment=?'; p.push(segment); }
     if (status) { q += ' AND status=?'; p.push(status); }
+    if (mode) { q += ' AND mode=?'; p.push(mode); }
     if (from) { q += ' AND DATE(created_at)>=?'; p.push(from); }
     if (to) { q += ' AND DATE(created_at)<=?'; p.push(to); }
     const countQ = q.replace('SELECT *', 'SELECT COUNT(*) as total');
@@ -747,15 +748,15 @@ app.get('/api/contacts', authMiddleware, async (req, res) => {
 app.post('/api/contacts', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'Database not connected' });
-  const { name, segment } = req.body;
+  const { name, segment, mode } = req.body;
   const phone = (req.body.phone || '').toString().trim().replace(/[^\d]/g, '');
   if (!phone) return res.status(400).json({ error: 'Phone required' });
   try {
     const [existing] = await pool.execute('SELECT id FROM contacts WHERE phone=?', [phone]);
     if (existing.length > 0) {
-      await pool.execute('UPDATE contacts SET name=COALESCE(?,name), segment=?, last_message=NOW() WHERE phone=?', [name || null, segment || 'General', phone]);
+      await pool.execute('UPDATE contacts SET name=COALESCE(?,name), segment=?, mode=COALESCE(?,mode), last_message=NOW() WHERE phone=?', [name || null, segment || 'General', mode || null, phone]);
     } else {
-      await pool.execute('INSERT INTO contacts (name, phone, segment, status, last_message) VALUES (?,?,?,"active",NOW())', [name || null, phone, segment || 'General']);
+      await pool.execute('INSERT INTO contacts (name, phone, segment, mode, status, last_message) VALUES (?,?,?,?,"active",NOW())', [name || null, phone, segment || 'General', mode || null]);
     }
     console.log(`Contact saved: ${phone} (${name || 'no name'})`);
     res.json({ success: true });
@@ -768,13 +769,13 @@ app.post('/api/contacts', authMiddleware, async (req, res) => {
 app.put('/api/contacts/:id', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.status(500).json({ error: 'Database not connected' });
-  const { name, segment, status } = req.body;
+  const { name, segment, status, mode } = req.body;
   const phone = (req.body.phone || '').toString().trim().replace(/[^\d]/g, '');
   if (!phone) return res.status(400).json({ error: 'Phone required' });
   try {
     await pool.execute(
-      'UPDATE contacts SET name=?, phone=?, segment=?, status=? WHERE id=?',
-      [name || null, phone, segment || 'General', status || 'active', req.params.id]
+      'UPDATE contacts SET name=?, phone=?, segment=?, status=?, mode=? WHERE id=?',
+      [name || null, phone, segment || 'General', status || 'active', mode || null, req.params.id]
     );
     res.json({ success: true });
   } catch (err) {
@@ -792,6 +793,19 @@ app.put('/api/contacts/:id/segment', authMiddleware, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('PUT /api/contacts/:id/segment error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/contacts/:id/mode', authMiddleware, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'Database not connected' });
+  const { mode } = req.body;
+  try {
+    await pool.execute('UPDATE contacts SET mode=? WHERE id=?', [mode || null, req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('PUT /api/contacts/:id/mode error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
