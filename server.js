@@ -1270,7 +1270,7 @@ app.get('/api/health', async (req, res) => {
   const pool = getPool();
   const result = {
     status: 'ok',
-    buildVersion: '2026-06-22-segment-mode-v3',
+    buildVersion: '2026-06-22-media-upload-v4',
     time: new Date().toISOString(),
     db: !!pool,
     dbHost: process.env.DB_HOST || 'not set',
