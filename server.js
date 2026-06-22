@@ -719,11 +719,13 @@ app.get('/api/contacts', authMiddleware, async (req, res) => {
   const pool = getPool();
   if (!pool) return res.json({ contacts: [], total: 0 });
   try {
-    const { search, segment, status, page = 1, limit = 50 } = req.query;
+    const { search, segment, status, from, to, page = 1, limit = 50 } = req.query;
     let q = 'SELECT * FROM contacts WHERE 1=1', p = [];
     if (search) { q += ' AND (name LIKE ? OR phone LIKE ?)'; p.push(`%${search}%`, `%${search}%`); }
     if (segment) { q += ' AND segment=?'; p.push(segment); }
     if (status) { q += ' AND status=?'; p.push(status); }
+    if (from) { q += ' AND DATE(created_at)>=?'; p.push(from); }
+    if (to) { q += ' AND DATE(created_at)<=?'; p.push(to); }
     const countQ = q.replace('SELECT *', 'SELECT COUNT(*) as total');
     const [[{ total }]] = await pool.execute(countQ, p);
 
@@ -757,6 +759,24 @@ app.post('/api/contacts', authMiddleware, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('POST /api/contacts error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/contacts/:id', authMiddleware, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'Database not connected' });
+  const { name, segment, status } = req.body;
+  const phone = (req.body.phone || '').toString().trim().replace(/[^\d]/g, '');
+  if (!phone) return res.status(400).json({ error: 'Phone required' });
+  try {
+    await pool.execute(
+      'UPDATE contacts SET name=?, phone=?, segment=?, status=? WHERE id=?',
+      [name || null, phone, segment || 'General', status || 'active', req.params.id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('PUT /api/contacts error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
