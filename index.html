@@ -967,8 +967,17 @@ async function apiFetch(url, opts = {}) {
   try {
     const res = await fetch(API + url, opts);
     if (res.status === 401) { doLogout(); return null; }
-    return res.json();
-  } catch { return null; }
+    let data;
+    try { data = await res.json(); } catch { data = null; }
+    if (!res.ok && !data?.error) {
+      showToast(`Server error (${res.status})`, 'error');
+      return { error: `Server error (${res.status})` };
+    }
+    return data;
+  } catch (e) {
+    showToast('Cannot reach server. Check your internet connection.', 'error');
+    return null;
+  }
 }
 
 // ==================== INIT ====================
@@ -2476,7 +2485,15 @@ function openModal(title, body, onSave) {
   document.getElementById('modal').classList.add('open');
 }
 function closeModal() { document.getElementById('modal').classList.remove('open'); }
-async function modalSave() { if (window._modalSave) await window._modalSave(); }
+async function modalSave() {
+  if (!window._modalSave) return;
+  try {
+    await window._modalSave();
+  } catch (e) {
+    console.error('Modal save error:', e);
+    showToast('Something went wrong: ' + e.message, 'error');
+  }
+}
 document.getElementById('modal').addEventListener('click', e => { if (e.target === document.getElementById('modal')) closeModal(); });
 
 // ==================== TOAST ====================
