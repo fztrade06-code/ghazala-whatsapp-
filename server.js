@@ -38,6 +38,8 @@ app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static(__dirname));
 
 const upload = multer({ dest: 'uploads/', limits: { fileSize: 90 * 1024 * 1024 } });
+// Railway's filesystem starts fresh — make sure the uploads folder actually exists
+if (!fs.existsSync('uploads')) fs.mkdirSync('uploads', { recursive: true });
 
 const WA_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_ID = process.env.PHONE_NUMBER_ID;
