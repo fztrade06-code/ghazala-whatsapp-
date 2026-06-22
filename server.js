@@ -312,7 +312,8 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId, m
       { id: 'reg_course_german', title: '🇩🇪 German' },
       { id: 'reg_course_ielts', title: '📝 IELTS' },
       { id: 'reg_course_pte', title: '💻 PTE' },
-      { id: 'reg_course_spoken', title: '🎤 Spoken English' }
+      { id: 'reg_course_spoken', title: '🎤 Spoken English' },
+      { id: 'reg_course_abroad', title: '✈️ Study Abroad' }
     ];
     const reply = '📚 *Which course would you like to join?*';
     await sendInteractiveButtons(phone, reply, courseButtons);
@@ -321,13 +322,14 @@ async function processIncomingMessage(phone, name, msgType, msgContent, msgId, m
   }
 
   if (session.state === 'reg_waiting_course') {
-    const courseMap = { 'reg_course_german': 'German', 'reg_course_ielts': 'IELTS', 'reg_course_pte': 'PTE', 'reg_course_spoken': 'Spoken English' };
+    const courseMap = { 'reg_course_german': 'German', 'reg_course_ielts': 'IELTS', 'reg_course_pte': 'PTE', 'reg_course_spoken': 'Spoken English', 'reg_course_abroad': 'Study Abroad' };
     if (msgType === 'interactive' && !courseMap[msgContent]) {
       const courseButtons = [
         { id: 'reg_course_german', title: '🇩🇪 German' },
         { id: 'reg_course_ielts', title: '📝 IELTS' },
         { id: 'reg_course_pte', title: '💻 PTE' },
-        { id: 'reg_course_spoken', title: '🎤 Spoken English' }
+        { id: 'reg_course_spoken', title: '🎤 Spoken English' },
+        { id: 'reg_course_abroad', title: '✈️ Study Abroad' }
       ];
       await sendInteractiveButtons(phone, '📚 Please select your *course*:', courseButtons);
       return;
@@ -777,6 +779,19 @@ app.put('/api/contacts/:id', authMiddleware, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('PUT /api/contacts error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/contacts/:id/segment', authMiddleware, async (req, res) => {
+  const pool = getPool();
+  if (!pool) return res.status(500).json({ error: 'Database not connected' });
+  const { segment } = req.body;
+  try {
+    await pool.execute('UPDATE contacts SET segment=? WHERE id=?', [segment || 'General', req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('PUT /api/contacts/:id/segment error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
