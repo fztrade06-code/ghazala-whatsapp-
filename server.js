@@ -1134,12 +1134,28 @@ app.put('/api/users/:id', authMiddleware, adminOnly, async (req, res) => {
 });
 
 // ── Health ───────────────────────────────────────────────────
-app.get('/api/health', (req, res) => res.json({
-  status: 'ok',
-  time: new Date().toISOString(),
-  db: !!getPool(),
-  whatsapp: !!(WA_TOKEN && PHONE_ID)
-}));
+app.get('/api/health', async (req, res) => {
+  const pool = getPool();
+  const result = {
+    status: 'ok',
+    time: new Date().toISOString(),
+    db: !!pool,
+    dbHost: process.env.DB_HOST || 'not set',
+    dbName: process.env.DB_NAME || 'ghazala_whatsapp (default)',
+    whatsapp: !!(WA_TOKEN && PHONE_ID)
+  };
+  if (pool) {
+    try {
+      const [[{ cnt }]] = await pool.execute('SELECT COUNT(*) as cnt FROM contacts');
+      const [recent] = await pool.execute('SELECT id, name, phone, created_at FROM contacts ORDER BY id DESC LIMIT 5');
+      result.contactsCount = cnt;
+      result.recentContacts = recent;
+    } catch (err) {
+      result.dbError = err.message;
+    }
+  }
+  res.json(result);
+});
 
 // Serve frontend
 const INDEX_PATH = path.join(__dirname, 'index.html');
