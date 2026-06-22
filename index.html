@@ -501,28 +501,42 @@ select.inp option{background:var(--surface2);}
 
               <!-- CSV Upload Area (shown when csv_upload selected) -->
               <div id="csvUploadArea" style="display:none;margin-bottom:12px;">
-                <div id="csvDropZone" onclick="document.getElementById('csvBcastFile').click()"
-                  style="border:2px dashed var(--border2);border-radius:10px;padding:20px;text-align:center;cursor:pointer;background:var(--surface2);transition:border-color .2s;"
-                  ondragover="event.preventDefault();this.style.borderColor='var(--green)'"
-                  ondragleave="this.style.borderColor='var(--border2)'"
-                  ondrop="event.preventDefault();this.style.borderColor='var(--border2)';parseBcastCSV(event.dataTransfer.files[0])">
-                  <div style="font-size:28px;margin-bottom:6px;">📁</div>
-                  <div style="font-weight:500;margin-bottom:4px;">Click or drag CSV file here</div>
-                  <div style="font-size:12px;color:var(--muted);">Required column: <code>phone</code> &nbsp;|&nbsp; Optional: <code>name</code>, any custom columns</div>
+
+                <!-- Step 1: Format guide (shown before upload) -->
+                <div id="csvFormatGuide" style="margin-bottom:12px;">
+                  <div id="csvFormatInner" style="padding:14px;background:var(--surface2);border-radius:10px;border:1px solid var(--border);">
+                    <div style="color:var(--muted);font-size:12px;">← Select a template first to see the required CSV format</div>
+                  </div>
                 </div>
-                <input type="file" id="csvBcastFile" accept=".csv,.tsv" style="display:none" onchange="parseBcastCSV(this.files[0])">
 
-                <!-- After upload: mapping + preview -->
+                <!-- Step 2: Drop zone -->
+                <div id="csvDropZone" onclick="document.getElementById('csvBcastFile').click()"
+                  style="border:2px dashed var(--border2);border-radius:10px;padding:22px;text-align:center;cursor:pointer;background:var(--surface2);transition:all .2s;"
+                  ondragover="event.preventDefault();this.style.borderColor='var(--green)';this.style.background='rgba(37,211,102,.06)'"
+                  ondragleave="this.style.borderColor='var(--border2)';this.style.background='var(--surface2)'"
+                  ondrop="event.preventDefault();this.style.borderColor='var(--border2)';this.style.background='var(--surface2)';parseBcastCSV(event.dataTransfer.files[0])">
+                  <div style="font-size:30px;margin-bottom:6px;">📁</div>
+                  <div style="font-weight:500;margin-bottom:4px;">Click or drag your CSV file here</div>
+                  <div id="csvDropHint" style="font-size:12px;color:var(--muted);">First column must be <code>phone</code></div>
+                </div>
+                <input type="file" id="csvBcastFile" accept=".csv,.tsv,.txt" style="display:none" onchange="parseBcastCSV(this.files[0])">
+
+                <!-- Step 3: After upload — auto-mapped preview -->
                 <div id="csvMappingArea" style="display:none;margin-top:12px;">
-                  <div id="csvCountBadge" style="padding:8px 12px;background:var(--surface3);border-radius:8px;font-size:13px;margin-bottom:10px;"></div>
+                  <div id="csvCountBadge" style="padding:9px 14px;background:var(--surface3);border-radius:8px;font-size:13px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">
+                    <span id="csvCountText"></span>
+                    <button class="btn btn-ghost btn-sm" onclick="resetCSVUpload()" style="font-size:11px;padding:3px 10px;">✕ Clear</button>
+                  </div>
 
-                  <div id="csvVarMapping" style="padding:12px;background:var(--surface2);border-radius:8px;margin-bottom:10px;display:none;">
-                    <div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--text2);">Map CSV columns → Template variables</div>
+                  <!-- Variable mapping table -->
+                  <div id="csvVarMapping" style="padding:12px 14px;background:var(--surface2);border-radius:10px;margin-bottom:12px;display:none;">
+                    <div style="font-size:12px;font-weight:500;margin-bottom:10px;color:var(--text2);">Variable mapping <span style="color:var(--muted);font-weight:400;">(auto-detected — change if needed)</span></div>
                     <div id="csvVarMapRows"></div>
                   </div>
 
-                  <div id="csvPreviewWrap" style="overflow-x:auto;">
-                    <div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Preview — first 5 rows</div>
+                  <!-- Live preview -->
+                  <div id="csvPreviewWrap" style="overflow-x:auto;border-radius:8px;border:1px solid var(--border);">
+                    <div style="font-size:11px;color:var(--muted);padding:6px 10px;background:var(--surface3);border-bottom:1px solid var(--border);">Preview — first 5 contacts</div>
                     <table id="csvPreviewTable" style="width:100%;font-size:11px;border-collapse:collapse;"></table>
                   </div>
                 </div>
@@ -700,7 +714,11 @@ select.inp option{background:var(--surface2);}
             <div class="form-row"><label>WhatsApp Number</label><input class="inp" id="p_whatsapp" placeholder="923001234567"></div>
             <div class="form-row"><label>Address</label><input class="inp" id="p_address" placeholder="City, Country"></div>
           </div>
-          <div class="form-row"><label>Profile Picture URL</label><input class="inp" id="p_pic" placeholder="https://..." oninput="previewPic()"></div>
+          <div class="form-row">
+            <label>Profile Picture</label>
+            <input type="file" class="inp" id="p_pic_file" accept="image/*" onchange="handleProfilePicUpload(this.files[0])">
+            <input type="hidden" id="p_pic">
+          </div>
           <div class="form-row"><label>About / Bio</label><textarea class="inp" id="p_about" placeholder="Short bio..."></textarea></div>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px;">
             <div class="form-row"><label>Facebook</label><input class="inp" id="p_fb" placeholder="URL"></div>
@@ -1224,8 +1242,9 @@ function onTemplateSelect() {
   } else { vf.style.display = 'none'; }
   updatePreview();
   // If CSV already uploaded, refresh the variable mapping UI
-  if (document.getElementById('bcastSegment').value === 'csv_upload' && bcastCSVContacts.length > 0) {
-    updateCSVVarMapping();
+  if (document.getElementById('bcastSegment').value === 'csv_upload') {
+    showCSVFormatGuide();
+    if (bcastCSVContacts.length > 0) buildCSVVarMapping();
   }
 }
 
@@ -1242,9 +1261,15 @@ function updatePreview() {
   document.getElementById('phonePreview').innerHTML = body.replace(/\*(.+?)\*/g,'<b>$1</b>').replace(/\n/g,'<br>');
 }
 
-// ── CSV broadcast state ─────────────────────────────────────
+// ── CSV broadcast ─────────────────────────────────────────────
 let bcastCSVContacts = [];
 let bcastCSVHeaders = [];
+
+function getSelectedTemplateVars() {
+  const sel = document.getElementById('bcastTemplate');
+  const opt = sel?.options[sel.selectedIndex];
+  return { vars: JSON.parse(opt?.dataset.vars || '[]'), label: opt?.text || '' };
+}
 
 function onSegmentChange() {
   const seg = document.getElementById('bcastSegment').value;
@@ -1255,8 +1280,8 @@ function onSegmentChange() {
     csvArea.style.display = 'block';
     manualRow.style.display = 'none';
     pill.style.display = 'none';
-    bcastCSVContacts = [];
-    document.getElementById('csvMappingArea').style.display = 'none';
+    resetCSVUpload();
+    showCSVFormatGuide();
   } else {
     csvArea.style.display = 'none';
     manualRow.style.display = 'block';
@@ -1265,35 +1290,109 @@ function onSegmentChange() {
   }
 }
 
+function showCSVFormatGuide() {
+  if (document.getElementById('bcastSegment')?.value !== 'csv_upload') return;
+  const { vars, label } = getSelectedTemplateVars();
+  const inner = document.getElementById('csvFormatInner');
+  if (!inner) return;
+
+  if (!vars.length && !label) {
+    inner.innerHTML = `<div style="color:var(--muted);font-size:12px;">← Select a template first to see the required CSV format</div>`;
+    document.getElementById('csvDropHint').textContent = 'First column must be phone';
+    return;
+  }
+
+  // Build the columns list
+  const allCols = ['phone', 'name', ...vars];
+  const colsHtml = allCols.map((col, i) => {
+    let badge = '', colStyle = '';
+    if (i === 0) { badge = `<span style="font-size:10px;background:#1a3a1a;color:#4ade80;padding:1px 6px;border-radius:4px;margin-left:4px;">required</span>`; colStyle = 'color:var(--green);'; }
+    else if (i === 1) { badge = `<span style="font-size:10px;background:var(--surface3);color:var(--muted);padding:1px 6px;border-radius:4px;margin-left:4px;">optional</span>`; }
+    else { badge = `<span style="font-size:10px;background:#1a2a3a;color:#60a5fa;padding:1px 6px;border-radius:4px;margin-left:4px;">{{${i-1}}}</span>`; colStyle = 'color:#93c5fd;'; }
+    return `<span style="display:inline-flex;align-items:center;background:var(--surface3);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;font-family:monospace;${colStyle}">${escapeHtml(col)}${badge}</span>`;
+  }).join(`<span style="color:var(--muted);margin:0 4px;font-size:16px;">›</span>`);
+
+  // Sample CSV rows
+  const sampleHeaders = allCols.join(',');
+  const sampleRow = ['923001234567', 'Ahmed Ali', ...vars.map(v => `Sample ${v}`)].join(',');
+
+  inner.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
+      <div>
+        <div style="font-size:11px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">
+          CSV columns for "${escapeHtml(label)}" (${vars.length} variable${vars.length!==1?'s':''})
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px;">${colsHtml}</div>
+        <div style="font-size:11px;background:var(--surface3);border-radius:6px;padding:8px 10px;font-family:monospace;color:var(--muted);overflow-x:auto;white-space:nowrap;">
+          <div style="color:var(--text2);margin-bottom:2px;">${escapeHtml(sampleHeaders)}</div>
+          <div>${escapeHtml(sampleRow)}</div>
+        </div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="downloadSampleCSV()" style="flex-shrink:0;white-space:nowrap;">
+        📥 Download Sample CSV
+      </button>
+    </div>
+  `;
+
+  document.getElementById('csvDropHint').innerHTML =
+    vars.length > 0
+      ? `Columns needed: <code>phone</code>, <code>name</code>, then <b>${vars.length} variable column${vars.length>1?'s':''}</b> in order`
+      : `Column needed: <code>phone</code> (and optional <code>name</code>)`;
+}
+
+function downloadSampleCSV() {
+  const { vars, label } = getSelectedTemplateVars();
+  const headers = ['phone', 'name', ...vars];
+  const sample1 = ['923001234567', 'Ahmed Ali', ...vars.map(v => `Sample ${v}`)];
+  const sample2 = ['923009876543', 'Sara Khan', ...vars.map(v => `Value ${v}`)];
+  const csv = [headers, sample1, sample2].map(row =>
+    row.map(v => v.includes(',') || v.includes('"') ? `"${v.replace(/"/g,'""')}"` : v).join(',')
+  ).join('\r\n');
+  const filename = `ghazala_broadcast_${(label||'template').toLowerCase().replace(/\s+/g,'_')}.csv`;
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = filename;
+  a.click();
+  showToast(`📥 Downloaded ${filename}`);
+}
+
 function parseBcastCSV(file) {
   if (!file) return;
   const reader = new FileReader();
   reader.onload = e => {
     const text = e.target.result.trim();
-    const lines = text.split('\n').filter(l => l.trim());
+    const lines = text.split(/\r?\n/).filter(l => l.trim());
     if (lines.length < 2) return showToast('CSV must have a header row + at least one data row', 'error');
 
-    bcastCSVHeaders = parseCSVLine(lines[0]).map(h => h.trim());
+    bcastCSVHeaders = parseCSVLine(lines[0]);
     bcastCSVContacts = [];
 
     for (let i = 1; i < lines.length; i++) {
       const vals = parseCSVLine(lines[i]);
-      if (!vals.length) continue;
+      if (!vals.length || !vals[0]?.trim()) continue;
       const obj = {};
       bcastCSVHeaders.forEach((h, j) => { obj[h] = (vals[j] || '').trim(); });
-      const phone = (obj['phone'] || obj['Phone'] || obj['number'] || obj['mobile'] || '').toString().trim();
-      if (phone) {
-        bcastCSVContacts.push({ ...obj, phone, name: obj['name'] || obj['Name'] || '' });
+      // Find phone: first column OR any column named phone/number/mobile
+      const phoneKey = bcastCSVHeaders.find(h => /^(phone|number|mobile|whatsapp)$/i.test(h)) || bcastCSVHeaders[0];
+      const phone = (obj[phoneKey] || '').toString().replace(/\D/g,'');
+      if (phone.length >= 7) {
+        const nameKey = bcastCSVHeaders.find(h => /^(name|full.?name|student.?name)$/i.test(h));
+        bcastCSVContacts.push({
+          ...obj,
+          phone,
+          name: nameKey ? (obj[nameKey] || '') : ''
+        });
       }
     }
 
-    if (!bcastCSVContacts.length) return showToast('No valid rows found. Make sure CSV has a "phone" column.', 'error');
+    if (!bcastCSVContacts.length) return showToast('No valid rows found. First column must be phone number.', 'error');
 
     document.getElementById('csvDropZone').style.borderColor = 'var(--green)';
-    document.getElementById('csvCountBadge').innerHTML =
-      `✅ <b>${bcastCSVContacts.length}</b> contacts loaded &nbsp;|&nbsp; Columns: <span style="color:var(--muted);">${bcastCSVHeaders.join(', ')}</span>`;
+    document.getElementById('csvDropZone').style.background = 'rgba(37,211,102,.04)';
+    document.getElementById('csvCountText').innerHTML =
+      `✅ <b>${bcastCSVContacts.length}</b> contacts loaded — <span style="color:var(--muted)">${bcastCSVHeaders.length} columns: ${bcastCSVHeaders.join(', ')}</span>`;
     document.getElementById('csvMappingArea').style.display = 'block';
-    updateCSVVarMapping();
+    buildCSVVarMapping();
   };
   reader.readAsText(file);
 }
@@ -1303,70 +1402,99 @@ function parseCSVLine(line) {
   let cur = '', inQ = false;
   for (const ch of line) {
     if (ch === '"') { inQ = !inQ; }
-    else if ((ch === ',' || ch === '\t') && !inQ) { result.push(cur); cur = ''; }
+    else if ((ch === ',' || ch === '\t') && !inQ) { result.push(cur.trim()); cur = ''; }
     else { cur += ch; }
   }
-  result.push(cur);
-  return result.map(v => v.replace(/^"|"$/g,''));
+  result.push(cur.trim());
+  return result.map(v => v.replace(/^"|"$/g, '').trim());
 }
 
-function updateCSVVarMapping() {
-  const sel = document.getElementById('bcastTemplate');
-  const opt = sel?.options[sel.selectedIndex];
-  const vars = JSON.parse(opt?.dataset.vars || '[]');
+function autoDetectVarCol(varName, varIndex) {
+  // 1. Exact header name match (case-insensitive) — e.g. CSV column literally called "Course Name"
+  const exactMatch = bcastCSVHeaders.findIndex(h => h.toLowerCase() === varName.toLowerCase());
+  if (exactMatch >= 0) return bcastCSVHeaders[exactMatch];
+
+  // 2. Position-based: skip phone + name cols, map remaining columns in order
+  //    var1 -> {{1}}, var2 -> {{2}}, var3 -> {{3}} ... regardless of column names
+  const skipCols = new Set(
+    bcastCSVHeaders.filter(h => /^(phone|number|mobile|whatsapp|name|full.?name|student.?name)$/i.test(h))
+  );
+  const dataCols = bcastCSVHeaders.filter(h => !skipCols.has(h));
+  return dataCols[varIndex] || '';
+}
+
+function buildCSVVarMapping() {
+  const { vars } = getSelectedTemplateVars();
   const mapWrap = document.getElementById('csvVarMapping');
   const mapRows = document.getElementById('csvVarMapRows');
 
-  if (!vars.length) { mapWrap.style.display = 'none'; renderCSVPreview([]); return; }
+  if (!vars.length) { mapWrap.style.display = 'none'; renderCSVPreview(); return; }
   mapWrap.style.display = 'block';
 
-  mapRows.innerHTML = vars.map((v, i) => `
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;">
-      <span style="min-width:110px;color:var(--muted);">{{${i+1}}} ${v}:</span>
-      <select class="inp" id="csvVarMap_${i}" style="flex:1;font-size:12px;padding:5px 8px;" onchange="renderCSVPreview()">
-        <option value="">-- fixed value from template --</option>
+  mapRows.innerHTML = vars.map((v, i) => {
+    const autoCol = autoDetectVarCol(v, i);
+    return `
+    <div style="display:grid;grid-template-columns:140px 1fr;gap:8px;align-items:center;margin-bottom:7px;">
+      <div style="font-size:12px;">
+        <span style="font-size:10px;background:#1a2a3a;color:#60a5fa;padding:2px 6px;border-radius:4px;margin-right:4px;">{{${i+1}}}</span>
+        <span style="color:var(--text2);">${escapeHtml(v)}</span>
+      </div>
+      <select class="inp" id="csvVarMap_${i}" style="font-size:12px;padding:5px 10px;" onchange="renderCSVPreview()">
+        <option value="">— leave blank —</option>
         ${bcastCSVHeaders.map(h =>
-          `<option value="${h}" ${h.toLowerCase()===v.toLowerCase()||i===0&&h.toLowerCase()==='name'?'selected':''}>${h}</option>`
+          `<option value="${escapeHtml(h)}" ${h === autoCol ? 'selected' : ''}>${escapeHtml(h)}</option>`
         ).join('')}
       </select>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 
-  renderCSVPreview(vars);
+  renderCSVPreview();
 }
 
-function renderCSVPreview(vars) {
-  if (!vars) {
-    const sel = document.getElementById('bcastTemplate');
-    const opt = sel?.options[sel.selectedIndex];
-    vars = JSON.parse(opt?.dataset.vars || '[]');
-  }
+function updateCSVVarMapping() { buildCSVVarMapping(); }
+
+function renderCSVPreview() {
+  const { vars } = getSelectedTemplateVars();
   const preview = bcastCSVContacts.slice(0, 5);
   const table = document.getElementById('csvPreviewTable');
+  if (!table) return;
 
-  const thStyle = 'padding:5px 8px;border-bottom:1px solid var(--border);text-align:left;font-weight:500;background:var(--surface2);';
-  const tdStyle = 'padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;';
+  const th = `padding:6px 10px;border-bottom:1px solid var(--border);text-align:left;font-weight:500;white-space:nowrap;background:var(--surface2);font-size:11px;`;
+  const td = `padding:5px 10px;border-bottom:1px solid var(--border2);font-size:11px;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;`;
 
   let html = `<thead><tr>
-    <th style="${thStyle}">Phone</th>
-    <th style="${thStyle}">Name</th>
-    ${vars.map((v,i) => `<th style="${thStyle}">{{${i+1}}} ${v}</th>`).join('')}
+    <th style="${th}">#</th>
+    <th style="${th}">Phone</th>
+    <th style="${th}">Name</th>
+    ${vars.map((v, i) => `<th style="${th}"><span style="color:#60a5fa;font-size:10px;">{{${i+1}}}</span> ${escapeHtml(v)}</th>`).join('')}
   </tr></thead><tbody>`;
 
-  preview.forEach(c => {
-    html += `<tr>
-      <td style="${tdStyle};color:var(--muted);">${c.phone}</td>
-      <td style="${tdStyle}">${c.name||'—'}</td>
-      ${vars.map((v,i) => {
+  preview.forEach((c, ri) => {
+    html += `<tr style="${ri%2===0?'':'background:var(--surface2)'}">
+      <td style="${td};color:var(--muted);">${ri+1}</td>
+      <td style="${td};font-family:monospace;">${c.phone}</td>
+      <td style="${td}">${c.name || '<span style="color:var(--muted)">—</span>'}</td>
+      ${vars.map((v, i) => {
         const col = document.getElementById(`csvVarMap_${i}`)?.value || '';
-        const val = col ? (c[col] || '—') : `<span style="color:var(--muted)">from template</span>`;
-        return `<td style="${tdStyle}">${val}</td>`;
+        const val = col ? (c[col] || '') : '';
+        return `<td style="${td}">${val ? escapeHtml(val) : '<span style="color:var(--muted)">—</span>'}</td>`;
       }).join('')}
     </tr>`;
   });
   html += '</tbody>';
-  if (bcastCSVContacts.length > 5) html += `<tfoot><tr><td colspan="${2+vars.length}" style="padding:5px 8px;font-size:10px;color:var(--muted);">…and ${bcastCSVContacts.length - 5} more</td></tr></tfoot>`;
+  if (bcastCSVContacts.length > 5) {
+    html += `<tfoot><tr><td colspan="${3+vars.length}" style="padding:5px 10px;font-size:10px;color:var(--muted);text-align:center;background:var(--surface2);">+ ${bcastCSVContacts.length - 5} more contacts</td></tr></tfoot>`;
+  }
   table.innerHTML = html;
+}
+
+function resetCSVUpload() {
+  bcastCSVContacts = [];
+  bcastCSVHeaders = [];
+  const dz = document.getElementById('csvDropZone');
+  if (dz) { dz.style.borderColor = 'var(--border2)'; dz.style.background = 'var(--surface2)'; }
+  document.getElementById('csvMappingArea').style.display = 'none';
+  document.getElementById('csvBcastFile').value = '';
 }
 
 async function sendBroadcast() {
@@ -2186,6 +2314,32 @@ async function loadProfile() {
     document.getElementById('twoFASetup').style.display = 'block';
     document.getElementById('twoFADisable').style.display = 'none';
   }
+}
+
+function handleProfilePicUpload(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) return showToast('Please select an image file', 'error');
+  if (file.size > 8 * 1024 * 1024) return showToast('Image too large (max 8MB)', 'error');
+
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      // Resize to max 400x400 and compress to keep file size small
+      const maxSize = 400;
+      let { width, height } = img;
+      if (width > height && width > maxSize) { height *= maxSize / width; width = maxSize; }
+      else if (height > maxSize) { width *= maxSize / height; height = maxSize; }
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+      document.getElementById('p_pic').value = dataUrl;
+      previewPic();
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
 }
 
 function previewPic() {
