@@ -739,7 +739,10 @@ app.post('/api/contacts', authMiddleware, async (req, res) => {
   const { name, phone, segment } = req.body;
   if (!phone) return res.status(400).json({ error: 'Phone required' });
   try {
-    await pool.execute('INSERT IGNORE INTO contacts (name, phone, segment) VALUES (?,?,?)', [name, phone, segment || 'General']);
+    await pool.execute(`
+      INSERT INTO contacts (name, phone, segment, last_message) VALUES (?,?,?,NOW())
+      ON DUPLICATE KEY UPDATE name=COALESCE(?,name), segment=?, last_message=NOW()
+    `, [name, phone, segment || 'General', name, segment || 'General']);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
