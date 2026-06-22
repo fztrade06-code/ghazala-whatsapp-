@@ -1359,10 +1359,7 @@ function downloadSampleCSV() {
     row.map(v => v.includes(',') || v.includes('"') ? `"${v.replace(/"/g,'""')}"` : v).join(',')
   ).join('\r\n');
   const filename = `ghazala_broadcast_${(label||'template').toLowerCase().replace(/\s+/g,'_')}.csv`;
-  const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
-  a.download = filename;
-  a.click();
+  downloadCSV(csv, filename);
   showToast(`📥 Downloaded ${filename}`);
 }
 
@@ -1859,9 +1856,8 @@ function exportLeads() {
     const csvContent = ['Name,Phone,Course,Level,Mode,Status,Date']
       .concat(leads.map(l => `"${l.name||''}","${l.phone||''}","${l.course||''}","${l.level||''}","${l.mode||''}","${l.status||''}","${l.created_at||''}"`))
       .join('\n');
-    const a = document.createElement('a');
-    a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csvContent);
-    a.download = 'ghazala_leads.csv'; a.click();
+    downloadCSV(csvContent, `ghazala_leads_${new Date().toISOString().slice(0,10)}.csv`);
+    showToast(`📤 Exported ${leads.length} leads`);
   });
 }
 
@@ -1914,13 +1910,23 @@ function openAddContact() {
     <div class="form-row"><label>Segment</label>
       <select class="inp" id="m_seg"><option>General</option><option>New Leads</option><option>Imported</option></select>
     </div>`, async () => {
+    const phone = document.getElementById('m_phone').value.trim();
+    if (!phone) return showToast('Phone number required', 'error');
     const r = await apiFetch('/api/contacts', { method:'POST', body:JSON.stringify({
       name: document.getElementById('m_name').value,
-      phone: document.getElementById('m_phone').value.trim(),
+      phone,
       segment: document.getElementById('m_seg').value
     })});
-    if (r?.success) { closeModal(); loadContacts(); showToast('Contact added'); }
-    else showToast(r?.error||'Failed', 'error');
+    if (r?.success) {
+      closeModal();
+      contactPage = 1;
+      document.getElementById('contactSearch').value = '';
+      document.getElementById('contactSegment').value = '';
+      loadContacts();
+      showToast('✅ Contact added — ' + phone);
+    } else {
+      showToast(r?.error || 'Failed to add contact', 'error');
+    }
   });
 }
 
@@ -1940,6 +1946,19 @@ function openImportContacts() {
   });
 }
 
+// Reliable CSV download — works on mobile browsers where data: URI downloads often silently fail
+function downloadCSV(csvContent, filename) {
+  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+}
+
 async function exportContacts() {
   const search = document.getElementById('contactSearch')?.value || '';
   const segment = document.getElementById('contactSegment')?.value || '';
@@ -1947,15 +1966,12 @@ async function exportContacts() {
   if (segment) url += `&segment=${encodeURIComponent(segment)}`;
   const data = await apiFetch(url);
   const contacts = data?.contacts || data || [];
-  if (!contacts.length) return showToast('No contacts to export', 'error');
+  if (!contacts.length) return showToast('No contacts to export yet — add some first', 'error');
   const esc = v => `"${String(v||'').replace(/"/g,'""')}"`;
   const csv = ['Name,Phone,Segment,Status,Last Message,Added On']
     .concat(contacts.map(c => [esc(c.name), esc(c.phone), esc(c.segment), esc(c.status), esc(formatDate(c.last_message)), esc(formatDate(c.created_at))].join(',')))
     .join('\n');
-  const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
-  a.download = `ghazala_contacts_${new Date().toISOString().slice(0,10)}.csv`;
-  a.click();
+  downloadCSV(csv, `ghazala_contacts_${new Date().toISOString().slice(0,10)}.csv`);
   showToast(`📤 Exported ${contacts.length} contacts`);
 }
 
