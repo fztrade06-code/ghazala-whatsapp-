@@ -3,6 +3,9 @@
   "version": "2.0.0",
   "description": "Ghazala Institute WhatsApp CRM System",
   "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
