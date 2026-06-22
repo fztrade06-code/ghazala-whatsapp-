@@ -726,25 +726,35 @@ app.get('/api/contacts', authMiddleware, async (req, res) => {
     if (status) { q += ' AND status=?'; p.push(status); }
     const countQ = q.replace('SELECT *', 'SELECT COUNT(*) as total');
     const [[{ total }]] = await pool.execute(countQ, p);
-    q += ' ORDER BY last_message DESC LIMIT ? OFFSET ?';
+    q += ' ORDER BY id DESC LIMIT ? OFFSET ?';
     p.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
     const [rows] = await pool.execute(q, p);
     res.json({ contacts: rows, total });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('GET /api/contacts error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/contacts', authMiddleware, async (req, res) => {
   const pool = getPool();
-  if (!pool) return res.status(500).json({ error: 'No DB' });
-  const { name, phone, segment } = req.body;
+  if (!pool) return res.status(500).json({ error: 'Database not connected' });
+  const { name, segment } = req.body;
+  const phone = (req.body.phone || '').toString().trim().replace(/[^\d]/g, '');
   if (!phone) return res.status(400).json({ error: 'Phone required' });
   try {
-    await pool.execute(`
-      INSERT INTO contacts (name, phone, segment, last_message) VALUES (?,?,?,NOW())
-      ON DUPLICATE KEY UPDATE name=COALESCE(?,name), segment=?, last_message=NOW()
-    `, [name, phone, segment || 'General', name, segment || 'General']);
+    const [existing] = await pool.execute('SELECT id FROM contacts WHERE phone=?', [phone]);
+    if (existing.length > 0) {
+      await pool.execute('UPDATE contacts SET name=COALESCE(?,name), segment=?, last_message=NOW() WHERE phone=?', [name || null, segment || 'General', phone]);
+    } else {
+      await pool.execute('INSERT INTO contacts (name, phone, segment, status, last_message) VALUES (?,?,?,"active",NOW())', [name || null, phone, segment || 'General']);
+    }
+    console.log(`Contact saved: ${phone} (${name || 'no name'})`);
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('POST /api/contacts error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/contacts/import', authMiddleware, upload.single('file'), async (req, res) => {
