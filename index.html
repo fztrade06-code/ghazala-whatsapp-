@@ -827,7 +827,7 @@ select.inp option{background:var(--surface2);}
 <div class="toast" id="toast"></div>
 
 <!-- MEDIA SEND MODAL -->
-<input type="file" id="mediaFileInput" style="display:none" accept="image/*,video/*,audio/*,.pdf,.doc,.docx" onchange="handleMediaFile()">
+<input type="file" id="mediaFileInput" style="display:none" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt" onchange="handleMediaFile()">
 
 <script>
 const API = '';
@@ -1777,22 +1777,36 @@ let currentMediaPhone = null;
 function handleMediaFile() {
   const file = document.getElementById('mediaFileInput').files[0];
   if (!file || !currentChat) return;
+  if (file.size > 85 * 1024 * 1024) {
+    showToast('File too large (max 85MB)', 'error');
+    document.getElementById('mediaFileInput').value = '';
+    return;
+  }
   openModal('📎 Send Media', `
     <div style="padding:16px;background:var(--surface2);border-radius:9px;margin-bottom:12px;">
       <div style="font-size:13px;font-weight:500;">📄 ${escapeHtml(file.name)}</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:4px;">${(file.size/1024).toFixed(1)} KB · ${file.type}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px;">${(file.size/1024).toFixed(1)} KB · ${file.type || 'unknown type'}</div>
     </div>
     <div class="form-row"><label>Caption (optional)</label><input class="inp" id="mediaCaption" placeholder="Add a caption..."></div>
-    <div class="info-box">⚠️ Media URL is required. Please host the file and provide the URL, or use a direct link.</div>
-    <div class="form-row"><label>Media URL</label><input class="inp" id="mediaUrl" placeholder="https://..."></div>
   `, async () => {
-    const url = document.getElementById('mediaUrl').value.trim();
     const caption = document.getElementById('mediaCaption').value.trim();
-    if (!url) return showToast('Enter media URL', 'error');
-    const mtype = file.type.startsWith('image') ? 'image' : file.type.startsWith('video') ? 'video' : file.type.startsWith('audio') ? 'audio' : 'document';
-    const r = await apiFetch(`/api/chats/${currentChat}/send`, { method:'POST', body:JSON.stringify({message:caption, mediaUrl:url, mediaType:mtype}) });
-    if (r?.success) { closeModal(); openChat(currentChat); showToast('Media sent!'); }
-    else showToast('Failed to send media', 'error');
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('caption', caption);
+    const res = await fetch(`${API}/api/chats/${currentChat}/send-media-file`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${authToken}` },
+      body: formData
+    });
+    let r;
+    try { r = await res.json(); } catch { r = null; }
+    if (r?.success) {
+      closeModal();
+      openChat(currentChat);
+      showToast('📎 Media sent!');
+    } else {
+      modalShowError(r?.error || 'Failed to send media');
+    }
   });
   document.getElementById('mediaFileInput').value = '';
 }
