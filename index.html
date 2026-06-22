@@ -645,6 +645,7 @@ select.inp option{background:var(--surface2);}
           </select>
           <button class="btn btn-primary btn-sm" onclick="openAddContact()">+ Add</button>
           <button class="btn btn-ghost btn-sm" onclick="openImportContacts()">📥 Import CSV</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportContacts()">📤 Download</button>
         </div>
         <div id="contactsList"><div class="loading-center"><div class="spinner"></div></div></div>
         <div class="pagination" id="contactsPagination"></div>
@@ -1928,6 +1929,25 @@ function openImportContacts() {
     if (r?.success) { closeModal(); loadContacts(); showToast(`✅ Imported ${r.imported}, failed ${r.failed}`); }
     else showToast(r?.error||'Import failed', 'error');
   });
+}
+
+async function exportContacts() {
+  const search = document.getElementById('contactSearch')?.value || '';
+  const segment = document.getElementById('contactSegment')?.value || '';
+  let url = `/api/contacts?page=1&limit=100000&search=${encodeURIComponent(search)}`;
+  if (segment) url += `&segment=${encodeURIComponent(segment)}`;
+  const data = await apiFetch(url);
+  const contacts = data?.contacts || data || [];
+  if (!contacts.length) return showToast('No contacts to export', 'error');
+  const esc = v => `"${String(v||'').replace(/"/g,'""')}"`;
+  const csv = ['Name,Phone,Segment,Status,Last Message,Added On']
+    .concat(contacts.map(c => [esc(c.name), esc(c.phone), esc(c.segment), esc(c.status), esc(formatDate(c.last_message)), esc(formatDate(c.created_at))].join(',')))
+    .join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = `ghazala_contacts_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  showToast(`📤 Exported ${contacts.length} contacts`);
 }
 
 // ==================== TEMPLATES ====================
