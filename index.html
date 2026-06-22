@@ -619,7 +619,9 @@ select.inp option{background:var(--surface2);}
           <input class="search-inp" type="text" placeholder="🔍 Search leads..." id="leadSearch" oninput="loadLeads()">
           <select class="select-inp" id="leadCourse" onchange="loadLeads()">
             <option value="">All Courses</option>
-            <option>German</option><option>IELTS</option><option>PTE</option><option>Spoken English</option>
+            <option>German</option><option>IELTS</option><option>PTE</option>
+            <option>Study Abroad</option>
+            <option value="Spoken English">English</option>
           </select>
           <select class="select-inp" id="leadMode" onchange="loadLeads()">
             <option value="">All Modes</option>
@@ -627,7 +629,8 @@ select.inp option{background:var(--surface2);}
           </select>
           <select class="select-inp" id="leadStatus" onchange="loadLeads()">
             <option value="">All Status</option>
-            <option>new</option><option>contacted</option><option>enrolled</option><option>dropped</option>
+            <option value="active">active</option>
+            <option value="new">new</option><option value="contacted">contacted</option><option value="enrolled">enrolled</option><option value="dropped">dropped</option>
           </select>
           <input class="select-inp" type="date" id="leadFrom" onchange="loadLeads()" placeholder="From">
           <input class="select-inp" type="date" id="leadTo" onchange="loadLeads()" placeholder="To">
@@ -1834,7 +1837,7 @@ async function loadLeads() {
         <td>${escapeHtml(l.mode||'—')}</td>
         <td>
           <select class="inp" style="padding:4px 8px;font-size:11px;width:100px;" onchange="updateLead(${l.id},this.value)">
-            ${['new','contacted','enrolled','dropped'].map(s=>`<option ${l.status===s?'selected':''}>${s}</option>`).join('')}
+            ${['active','new','contacted','enrolled','dropped'].map(s=>`<option ${l.status===s?'selected':''}>${s}</option>`).join('')}
           </select>
         </td>
         <td style="color:var(--muted);font-size:12px;">${formatDate(l.created_at)}</td>
@@ -1898,7 +1901,11 @@ async function loadContacts() {
       <tr>
         <td><div style="display:flex;align-items:center;gap:9px;"><div class="av">${(c.name||c.phone)[0].toUpperCase()}</div>${escapeHtml(c.name||'—')}</div></td>
         <td>${c.phone}</td>
-        <td><span class="pill pill-muted">${escapeHtml(c.segment||'General')}</span></td>
+        <td>
+          <select class="inp" style="padding:4px 8px;font-size:11px;width:110px;" onchange="updateContactSegment(${c.id},this.value)">
+            ${['General','New Leads','Imported'].map(s=>`<option ${ (c.segment||'General')===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </td>
         <td><span class="pill ${c.status==='active'?'pill-green':c.status==='opted_out'?'pill-gold':'pill-red'}">${c.status}</span></td>
         <td style="color:var(--muted);font-size:12px;">${formatDate(c.last_message)}</td>
         <td style="display:flex;gap:6px;">
@@ -1920,6 +1927,12 @@ async function loadContacts() {
     pgHtml += `<span style="font-size:12px;color:var(--muted);">${total} total</span>`;
   }
   document.getElementById('contactsPagination').innerHTML = pgHtml;
+}
+
+async function updateContactSegment(id, segment) {
+  const r = await apiFetch(`/api/contacts/${id}/segment`, { method:'PUT', body:JSON.stringify({segment}) });
+  if (r?.success) showToast('Segment updated — ' + segment);
+  else showToast(r?.error || 'Failed to update segment', 'error');
 }
 
 function openEditContact(id) {
